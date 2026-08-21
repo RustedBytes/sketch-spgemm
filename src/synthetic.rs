@@ -54,11 +54,7 @@ pub fn overlap_problem(
     for k in 0..hubs {
         for j in 0..cols {
             let value = if j < canceled_columns {
-                if k < hubs / 2 {
-                    1
-                } else {
-                    -1
-                }
+                if k < hubs / 2 { 1 } else { -1 }
             } else {
                 1
             };
@@ -115,25 +111,13 @@ pub fn sparse_output_problem(
 ) -> SyntheticProblem {
     assert!(rows > 0 && inner > 0 && cols > 0);
     assert!((0.0..=1.0).contains(&cancel_fraction));
-    assert!(
-        amplification_width.is_power_of_two(),
-        "amplification width must be a power of two"
-    );
-    assert!(
-        amplification_width <= inner,
-        "amplification width exceeds inner dimension"
-    );
-    assert!(
-        rows <= amplification_width,
-        "sparse-output generator requires rows <= amplification width"
-    );
+    assert!(amplification_width.is_power_of_two(), "amplification width must be a power of two");
+    assert!(amplification_width <= inner, "amplification width exceeds inner dimension");
+    assert!(rows <= amplification_width, "sparse-output generator requires rows <= amplification width");
 
     let active_columns = active_columns.min(cols);
     let nnz_per_active_column = nnz_per_active_column.min(rows);
-    assert!(
-        nnz_per_active_column > 0,
-        "nnz per active output column must be positive"
-    );
+    assert!(nnz_per_active_column > 0, "nnz per active output column must be positive");
 
     // A consists of the first `rows` Walsh-Hadamard codewords. Every entry in
     // the active width is ±1, so candidate amplification is large and regular.
@@ -209,11 +193,7 @@ fn selected_rows(rows: usize, count: usize, column: usize) -> Vec<usize> {
 
 #[inline]
 fn hadamard_sign(row: usize, col: usize) -> i64 {
-    if ((row & col).count_ones() & 1) == 0 {
-        1
-    } else {
-        -1
-    }
+    if ((row & col).count_ones() & 1) == 0 { 1 } else { -1 }
 }
 
 #[cfg(test)]

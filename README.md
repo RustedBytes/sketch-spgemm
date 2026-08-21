@@ -1,10 +1,22 @@
-# SketchSpGEMM v0.7 — adaptive execution + residual fingerprints
+# SketchSpGEMM v0.7.1 — low-overhead automatic execution
 
 Research prototype inspired by Graia, **Optimal Deterministic Fully Sparse Matrix Multiplication** (arXiv:2608.18496), with practical moment/IBLT-style recovery derived from the nested sparse-recovery architecture.
 
-v0.7 builds on the first successful v0.6 benchmark where the complete moment+mask+scheduler algorithm beat the adaptive exact baseline. The production-oriented question is now: **can the library decide when to use sketch recovery without knowing the true `nnz(A*B)`, and can it stop safely without an exact `K`?**
+v0.7.1 is an overhead-reduction release. v0.7 already selected the correct sketch strategy without true `K`, but on the 256×512 sparse-output benchmark its automatic wrapper took ~43 ms versus ~17 ms for the hand-tuned sketch path. v0.7.1 targets that gap without changing the recovery mathematics.
 
-## What is new
+## What is new in v0.7.1
+
+### 0. Low-overhead analysis and certification
+
+- Candidate-product counting remains a degree-only pass.
+- A structural amplification prefilter can choose exact execution without multiplying sampled rows.
+- Exact sampled rows now use a dense scratch accumulator plus touched-column list instead of a `HashMap`.
+- Sampling is staged: clearly bad workloads can stop early; sketch acceptance waits until the sample contains enough repeated column observations to make active-column inference identifiable.
+- Residual-fingerprint lanes are fused into one traversal of A and one traversal of B.
+- Arithmetic modulo `2^61-1` now uses Mersenne folding rather than generic 128-bit `%` in the hot multiply loop.
+- `AutoSpGEMMStats` reports analysis, candidate-count, row-sampling, nested, fingerprint-setup/check, and exact-fallback timings.
+
+## v0.7 production features
 
 ### 1. `AutoSpGEMM`
 
@@ -17,7 +29,7 @@ let (c, stats) = auto_spgemm(&a, &b, AutoSpGemmConfig::default());
 It does not receive the true output or true `nnz(C)`. It:
 
 1. computes the candidate-product count `F` in `O(nnz(A))` using B row degrees;
-2. exactly multiplies a small set of evenly spaced A rows;
+2. applies a structural amplification prefilter, then exactly multiplies only as many evenly spaced A rows as needed;
 3. estimates output nnz, active output columns, average nnz per active column, output density, and `rho = F / estimated_nnz(C)`;
 4. predicts the moment-recovery row count at the likely useful `q`;
 5. chooses **exact** or **moment-sketch** execution;
@@ -38,7 +50,7 @@ These are engineering defaults, not theorem constants. They are configurable thr
 
 ### 2. Independent residual fingerprint
 
-v0.7 can certify that a reconstructed candidate `D` satisfies `AB-D = 0` without knowing exact `K`.
+v0.7.1 can certify that a reconstructed candidate `D` satisfies `AB-D = 0` without knowing exact `K`.
 
 For each independent lane it chooses random field weights `r_i` and `s_j` modulo the Mersenne prime `2^61-1` and precomputes:
 
@@ -54,7 +66,7 @@ phi(D) = sum_(i,j in supp(D)) r_i * D_ij * s_j
 
 and checks `phi(D) == phi(AB)`.
 
-The expensive target fingerprint is still only linear in the input nnz per lane; checking a candidate is linear in `nnz(D)`. Three independently seeded lanes are the default. A zero seed requests a runtime-derived seed; tests use fixed seeds for reproducibility.
+The target fingerprint is linear in input nnz and checking a candidate is linear in `nnz(D)`. In v0.7.1 all lanes share one sparse traversal of A/B, and Mersenne reduction avoids generic integer division in the hot path. Three independently seeded lanes are the default. A zero seed requests a runtime-derived seed; tests use fixed seeds for reproducibility.
 
 This is a **probabilistic residual certificate**, not Graia's deterministic recovery theorem. Exact identity recovery and exact correction remain available when deterministic verification is required.
 
@@ -68,7 +80,7 @@ CLI controls:
 
 ### 3. Prepared rectangular factors
 
-v0.6 repeatedly converted dense sketch factors into sparse row views inside the rectangular dispatcher. v0.7 introduces `PreparedFactor`:
+v0.6 repeatedly converted dense sketch factors into sparse row views inside the rectangular dispatcher. v0.7 introduced `PreparedFactor`:
 
 ```text
 DenseMatrix
@@ -105,7 +117,7 @@ So the schedule can be conservative without forcing the practical q scheduler to
 
 If the estimate is wrong, the residual fingerprint detects an incomplete result. `AutoSpGEMM` then falls back to exact multiplication when `exact_fallback=true`.
 
-## Recommended v0.7 benchmark
+## Recommended v0.7.1 benchmark
 
 First verify the crate:
 
@@ -144,12 +156,12 @@ cargo run --release -- \
 There are two useful outputs:
 
 1. the explicit nested benchmark, which still receives `K=nnz(C)` as its schedule bound because the CLI is a research harness, but does **not** use it as an exact stop condition when `--exact-k-bound false`;
-2. the `AutoSpGEMM v0.7` section, which receives **no true K at all** and uses only sampled estimates + residual fingerprinting.
+2. the `AutoSpGEMM v0.7.1` section, which receives **no true K at all** and uses only sampled estimates + residual fingerprinting.
 
 A successful auto result should look qualitatively like:
 
 ```text
-AutoSpGEMM v0.7 (does not use true K):
+AutoSpGEMM v0.7.1 (does not use true K):
   choice: Sketch
   exact product check (benchmark oracle): PASS
   estimate: ... est-col-nnz around single digits ... q=8 ...
@@ -190,7 +202,7 @@ nested_spgemm_with_policy(...)
 // engineering controls
 nested_spgemm_with_options(...)
 
-// v0.7 production-oriented wrapper
+// v0.7.1 production-oriented wrapper
 auto_spgemm(...)
 analyze_workload(...)
 
@@ -229,4 +241,15 @@ outer support discovery
 + exact fallback when certification fails
 ```
 
-The GUV backend remains available for theorem-oriented experiments. The purpose of the v0.7 path is different: turn the paper's compressed-recovery architecture into a useful adaptive SpGEMM strategy on workloads where candidate-product amplification is extreme but the true output is column-sparse.
+The GUV backend remains available for theorem-oriented experiments. The purpose of the v0.7.1 path is different: turn the paper's compressed-recovery architecture into a useful adaptive SpGEMM strategy on workloads where candidate-product amplification is extreme but the true output is column-sparse.
+
+
+## v0.7.1 timing output
+
+The Auto section now includes a line similar to:
+
+```text
+auto timing: analysis=... [candidate=..., sampling=...], nested=..., fp-setup=..., fp-checks=..., exact=...
+```
+
+This is intentionally exposed so selector/certificate overhead can be compared with the actual nested recovery time rather than hidden inside one total.

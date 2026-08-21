@@ -21,7 +21,8 @@ impl CsrMatrix {
     }
 
     pub fn from_triplets(rows: usize, cols: usize, triplets: &[(usize, usize, i64)]) -> Self {
-        let mut per_row: Vec<BTreeMap<usize, i64>> = (0..rows).map(|_| BTreeMap::new()).collect();
+        let mut per_row: Vec<BTreeMap<usize, i64>> =
+            (0..rows).map(|_| BTreeMap::new()).collect();
 
         for &(r, c, v) in triplets {
             assert!(r < rows, "triplet row {r} out of range {rows}");

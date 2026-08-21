@@ -1,8 +1,8 @@
 [package]
 name = "sketch-spgemm"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
-description = "Adaptive SketchSpGEMM with moment recovery, masking, fingerprints, and automatic exact/sketch selection"
+description = "Adaptive SketchSpGEMM with low-overhead auto selection and fused residual fingerprints"
 license = "MIT OR Apache-2.0"
 
 [profile.release]

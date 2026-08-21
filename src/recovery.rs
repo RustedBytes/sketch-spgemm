@@ -1,11 +1,8 @@
 use crate::fingerprint::{FingerprintConfig, FingerprintStats, ResidualFingerprint};
 use crate::guv::{GuvConfig, GuvParameters, GuvRecovery};
 use crate::matrix::{CsrMatrix, DenseMatrix};
-use crate::rect::{
-    adaptive_matmul_prepared, PreparedFactor, RectangularKernel, RectangularPolicy,
-    RectangularStats,
-};
 use crate::sketch::{paper_schedule, RoundParams};
+use crate::rect::{adaptive_matmul_prepared, PreparedFactor, RectangularKernel, RectangularPolicy, RectangularStats};
 use crate::spgemm::dense_matmul;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -102,9 +99,7 @@ pub enum BinaryRecoveryMatrix {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum RecoveryMatrixKey {
-    Identity {
-        domain: usize,
-    },
+    Identity { domain: usize },
     Signature {
         domain: usize,
         capacity: usize,
@@ -213,17 +208,9 @@ impl BinaryRecoveryMatrix {
         assert!(index < self.domain());
         match self {
             Self::Identity { .. } => vec![(index, 1)],
-            Self::Signature(s) => s
-                .rows_for_index(index)
-                .into_iter()
-                .map(|r| (r, 1))
-                .collect(),
+            Self::Signature(s) => s.rows_for_index(index).into_iter().map(|r| (r, 1)).collect(),
             Self::Moment(m) => m.weighted_rows_for_index(index),
-            Self::Guv(g) => g
-                .rows_for_index(index)
-                .into_iter()
-                .map(|r| (r, 1))
-                .collect(),
+            Self::Guv(g) => g.rows_for_index(index).into_iter().map(|r| (r, 1)).collect(),
         }
     }
 }
@@ -326,13 +313,7 @@ impl MomentRecovery {
             .max(degree)
             .min(domain.max(1));
         let degree = degree.min(bucket_count);
-        Self {
-            domain,
-            capacity,
-            bucket_count,
-            degree,
-            seed,
-        }
+        Self { domain, capacity, bucket_count, degree, seed }
     }
 
     #[inline]
@@ -385,51 +366,23 @@ trait ExpanderSignature {
 }
 
 impl ExpanderSignature for SignatureRecovery {
-    fn domain(&self) -> usize {
-        self.domain
-    }
-    fn bucket_count(&self) -> usize {
-        self.bucket_count
-    }
-    fn degree(&self) -> usize {
-        self.degree
-    }
-    fn bits(&self) -> usize {
-        self.bits
-    }
-    fn neighbors(&self, index: usize) -> Vec<usize> {
-        SignatureRecovery::neighbors(self, index)
-    }
-    fn rows_for_index(&self, index: usize) -> Vec<usize> {
-        SignatureRecovery::rows_for_index(self, index)
-    }
-    fn rows(&self) -> usize {
-        SignatureRecovery::rows(self)
-    }
+    fn domain(&self) -> usize { self.domain }
+    fn bucket_count(&self) -> usize { self.bucket_count }
+    fn degree(&self) -> usize { self.degree }
+    fn bits(&self) -> usize { self.bits }
+    fn neighbors(&self, index: usize) -> Vec<usize> { SignatureRecovery::neighbors(self, index) }
+    fn rows_for_index(&self, index: usize) -> Vec<usize> { SignatureRecovery::rows_for_index(self, index) }
+    fn rows(&self) -> usize { SignatureRecovery::rows(self) }
 }
 
 impl ExpanderSignature for GuvRecovery {
-    fn domain(&self) -> usize {
-        self.domain
-    }
-    fn bucket_count(&self) -> usize {
-        self.bucket_count
-    }
-    fn degree(&self) -> usize {
-        self.degree
-    }
-    fn bits(&self) -> usize {
-        self.bits
-    }
-    fn neighbors(&self, index: usize) -> Vec<usize> {
-        GuvRecovery::neighbors(self, index)
-    }
-    fn rows_for_index(&self, index: usize) -> Vec<usize> {
-        GuvRecovery::rows_for_index(self, index)
-    }
-    fn rows(&self) -> usize {
-        GuvRecovery::rows(self)
-    }
+    fn domain(&self) -> usize { self.domain }
+    fn bucket_count(&self) -> usize { self.bucket_count }
+    fn degree(&self) -> usize { self.degree }
+    fn bits(&self) -> usize { self.bits }
+    fn neighbors(&self, index: usize) -> Vec<usize> { GuvRecovery::neighbors(self, index) }
+    fn rows_for_index(&self, index: usize) -> Vec<usize> { GuvRecovery::rows_for_index(self, index) }
+    fn rows(&self) -> usize { GuvRecovery::rows(self) }
 }
 
 #[derive(Clone, Debug)]
@@ -607,12 +560,10 @@ pub fn nested_spgemm_with_options(
     // Round-reseeded Signature/Moment matrices are not cached, while identity/GUV
     // factors and products are reused. A support-masked B factor is deliberately
     // round-local because the mask changes as columns are recovered.
-    let mut recovery_matrix_cache: HashMap<RecoveryMatrixKey, BinaryRecoveryMatrix> =
-        HashMap::new();
+    let mut recovery_matrix_cache: HashMap<RecoveryMatrixKey, BinaryRecoveryMatrix> = HashMap::new();
     let mut left_factor_cache: HashMap<RecoveryMatrixKey, Arc<PreparedFactor>> = HashMap::new();
     let mut right_factor_cache: HashMap<RecoveryMatrixKey, Arc<PreparedFactor>> = HashMap::new();
-    let mut product_cache: HashMap<(RecoveryMatrixKey, RecoveryMatrixKey), CachedProduct> =
-        HashMap::new();
+    let mut product_cache: HashMap<(RecoveryMatrixKey, RecoveryMatrixKey), CachedProduct> = HashMap::new();
     let mut residual_cache: HashMap<ResidualCacheKey, CachedResidual> = HashMap::new();
 
     let mut schedule_pos = 0usize;
@@ -673,21 +624,21 @@ pub fn nested_spgemm_with_options(
         let bgt_cache_hit: bool;
 
         let (w, rectangular_stats) = if masked_residual {
-            let (ha, hit, elapsed) = get_or_build_factor(&mut left_factor_cache, &h_key, || {
-                left_recovery_sketch(a, &h)
-            });
+            let (ha, hit, elapsed) = get_or_build_factor(
+                &mut left_factor_cache,
+                &h_key,
+                || left_recovery_sketch(a, &h),
+            );
             ha_cache_hit = hit;
             left_time = elapsed;
 
             let start = Instant::now();
-            let bgt =
-                PreparedFactor::new(right_recovery_sketch_masked(b, &g, active_mask.unwrap()));
+            let bgt = PreparedFactor::new(right_recovery_sketch_masked(b, &g, active_mask.unwrap()));
             right_time = start.elapsed();
             bgt_cache_hit = false;
 
             let start = Instant::now();
-            let (hcgt, rect_stats) =
-                adaptive_matmul_prepared(&ha, &bgt, options.rectangular_policy);
+            let (hcgt, rect_stats) = adaptive_matmul_prepared(&ha, &bgt, options.rectangular_policy);
             rectangular_time = start.elapsed();
 
             let start = Instant::now();
@@ -710,23 +661,24 @@ pub fn nested_spgemm_with_options(
                     bgt_cache_hit = right_factor_cache.contains_key(&g_key);
                     (cached.matrix.clone(), cached.stats.clone())
                 } else {
-                    let (ha, hit, elapsed) =
-                        get_or_build_factor(&mut left_factor_cache, &h_key, || {
-                            left_recovery_sketch(a, &h)
-                        });
+                    let (ha, hit, elapsed) = get_or_build_factor(
+                        &mut left_factor_cache,
+                        &h_key,
+                        || left_recovery_sketch(a, &h),
+                    );
                     ha_cache_hit = hit;
                     left_time = elapsed;
 
-                    let (bgt, hit, elapsed) =
-                        get_or_build_factor(&mut right_factor_cache, &g_key, || {
-                            right_recovery_sketch(b, &g)
-                        });
+                    let (bgt, hit, elapsed) = get_or_build_factor(
+                        &mut right_factor_cache,
+                        &g_key,
+                        || right_recovery_sketch(b, &g),
+                    );
                     bgt_cache_hit = hit;
                     right_time = elapsed;
 
                     let start = Instant::now();
-                    let (product, rect_stats) =
-                        adaptive_matmul_prepared(&ha, &bgt, options.rectangular_policy);
+                    let (product, rect_stats) = adaptive_matmul_prepared(&ha, &bgt, options.rectangular_policy);
                     rectangular_time = start.elapsed();
                     let product = Arc::new(product);
                     product_cache.insert(
@@ -755,21 +707,24 @@ pub fn nested_spgemm_with_options(
                 (residual, rect_stats)
             }
         } else {
-            let (ha, hit, elapsed) = get_or_build_factor(&mut left_factor_cache, &h_key, || {
-                left_recovery_sketch(a, &h)
-            });
+            let (ha, hit, elapsed) = get_or_build_factor(
+                &mut left_factor_cache,
+                &h_key,
+                || left_recovery_sketch(a, &h),
+            );
             ha_cache_hit = hit;
             left_time = elapsed;
 
-            let (bgt, hit, elapsed) = get_or_build_factor(&mut right_factor_cache, &g_key, || {
-                right_recovery_sketch(b, &g)
-            });
+            let (bgt, hit, elapsed) = get_or_build_factor(
+                &mut right_factor_cache,
+                &g_key,
+                || right_recovery_sketch(b, &g),
+            );
             bgt_cache_hit = hit;
             right_time = elapsed;
 
             let start = Instant::now();
-            let (hcgt, rect_stats) =
-                adaptive_matmul_prepared(&ha, &bgt, options.rectangular_policy);
+            let (hcgt, rect_stats) = adaptive_matmul_prepared(&ha, &bgt, options.rectangular_policy);
             rectangular_time = start.elapsed();
 
             let start = Instant::now();
@@ -786,8 +741,10 @@ pub fn nested_spgemm_with_options(
         let w_nnz = w.nnz();
 
         // A zero identity residual is global only when no support mask was used.
-        let certified_zero_residual =
-            !masked_residual && h.is_identity() && g.is_identity() && w_nnz == 0;
+        let certified_zero_residual = !masked_residual
+            && h.is_identity()
+            && g.is_identity()
+            && w_nnz == 0;
 
         let start = Instant::now();
         let outer = if certified_zero_residual {
@@ -800,8 +757,7 @@ pub fn nested_spgemm_with_options(
         // Identity G exposes concrete output-column ids. Use the first such
         // observation as a practical superset mask; subsequent rounds only
         // remove columns that have been accepted by the inner decoder.
-        if options.masked_residual && g.is_identity() && support_mask.is_none() && !outer.is_empty()
-        {
+        if options.masked_residual && g.is_identity() && support_mask.is_none() && !outer.is_empty() {
             let mut mask = vec![false; c];
             for (j, _) in &outer {
                 mask[*j] = true;
@@ -840,11 +796,7 @@ pub fn nested_spgemm_with_options(
         // benchmark implies average remaining column sparsity K_remaining/m.
         // Jump to the next power of two rather than spending a round below that.
         if options.practical_scheduler && g.is_identity() {
-            let observed = remaining_mask_columns.max(if support_mask.is_none() {
-                outer_recovered
-            } else {
-                0
-            });
+            let observed = remaining_mask_columns.max(if support_mask.is_none() { outer_recovered } else { 0 });
             if observed > 0 {
                 let scheduler_k = options.scheduler_k_hint.unwrap_or(k);
                 let remaining_bound = scheduler_k.saturating_sub(d.nnz()).max(1);
@@ -933,11 +885,7 @@ pub fn nested_spgemm_with_options(
                 stats.fingerprint_check_time += start.elapsed();
                 if let Some(fps) = stats.fingerprint.as_mut() {
                     fps.checks += 1;
-                    if passed {
-                        fps.passes += 1;
-                    } else {
-                        fps.failures += 1;
-                    }
+                    if passed { fps.passes += 1; } else { fps.failures += 1; }
                 }
                 if passed {
                     stats.fingerprint_verified = true;
@@ -959,10 +907,7 @@ pub fn nested_spgemm_with_options(
         // K verified/accepted nonzeros is a useful practical stop condition.
         if options.exact_k_bound
             && options.masked_residual
-            && support_mask
-                .as_ref()
-                .map(|m| !m.iter().any(|&x| x))
-                .unwrap_or(false)
+            && support_mask.as_ref().map(|m| !m.iter().any(|&x| x)).unwrap_or(false)
             && d.nnz() == k
         {
             stats.deterministic_verified = true;
@@ -977,10 +922,7 @@ pub fn nested_spgemm_with_options(
         // If the observed mask was exhausted but K says entries remain, discard
         // the mask so a later full round can discover omitted support.
         if options.exact_k_bound
-            && support_mask
-                .as_ref()
-                .map(|m| !m.iter().any(|&x| x))
-                .unwrap_or(false)
+            && support_mask.as_ref().map(|m| !m.iter().any(|&x| x)).unwrap_or(false)
             && d.nnz() < k
         {
             support_mask = None;
@@ -998,17 +940,12 @@ pub fn nested_spgemm_with_options(
             stats.fingerprint_check_time += start.elapsed();
             if let Some(fps) = stats.fingerprint.as_mut() {
                 fps.checks += 1;
-                if passed {
-                    fps.passes += 1;
-                } else {
-                    fps.failures += 1;
-                }
+                if passed { fps.passes += 1; } else { fps.failures += 1; }
             }
             if passed {
                 stats.fingerprint_verified = true;
                 stats.terminated_early = true;
-                stats.termination_reason =
-                    Some("final residual fingerprint certified AB-D=0".to_string());
+                stats.termination_reason = Some("final residual fingerprint certified AB-D=0".to_string());
             }
         }
     }
@@ -1122,8 +1059,16 @@ fn recovery_matrix_key_hint(
     match backend {
         RecoveryBackend::Identity => RecoveryMatrixKey::Identity { domain },
         RecoveryBackend::Signature(cfg) => {
-            let seed = cfg.seed ^ salt ^ (round as u64).wrapping_mul(0xA076_1D64_78BD_642F);
-            let sig = SignatureRecovery::new(domain, capacity, cfg.degree, cfg.oversampling, seed);
+            let seed = cfg.seed
+                ^ salt
+                ^ (round as u64).wrapping_mul(0xA076_1D64_78BD_642F);
+            let sig = SignatureRecovery::new(
+                domain,
+                capacity,
+                cfg.degree,
+                cfg.oversampling,
+                seed,
+            );
             if cfg.identity_fallback && sig.rows() >= domain {
                 RecoveryMatrixKey::Identity { domain }
             } else {
@@ -1137,8 +1082,12 @@ fn recovery_matrix_key_hint(
             }
         }
         RecoveryBackend::Moment(cfg) => {
-            let seed = cfg.seed ^ salt ^ (round as u64).wrapping_mul(0xA076_1D64_78BD_642F);
-            let moment = MomentRecovery::new(domain, capacity, cfg.degree, cfg.oversampling, seed);
+            let seed = cfg.seed
+                ^ salt
+                ^ (round as u64).wrapping_mul(0xA076_1D64_78BD_642F);
+            let moment = MomentRecovery::new(
+                domain, capacity, cfg.degree, cfg.oversampling, seed,
+            );
             if cfg.identity_fallback && moment.rows() >= domain {
                 RecoveryMatrixKey::Identity { domain }
             } else {
@@ -1155,7 +1104,12 @@ fn recovery_matrix_key_hint(
             if capacity == 1 {
                 return RecoveryMatrixKey::Identity { domain };
             }
-            let estimated = GuvParameters::estimated_rows(domain, capacity, cfg.alpha, cfg.epsilon);
+            let estimated = GuvParameters::estimated_rows(
+                domain,
+                capacity,
+                cfg.alpha,
+                cfg.epsilon,
+            );
             if cfg.identity_fallback && estimated >= domain {
                 RecoveryMatrixKey::Identity { domain }
             } else {
@@ -1183,8 +1137,16 @@ fn build_recovery_matrix(
             RecoveryMatrixKey::Identity { domain },
         ),
         RecoveryBackend::Signature(cfg) => {
-            let seed = cfg.seed ^ salt ^ (round as u64).wrapping_mul(0xA076_1D64_78BD_642F);
-            let sig = SignatureRecovery::new(domain, capacity, cfg.degree, cfg.oversampling, seed);
+            let seed = cfg.seed
+                ^ salt
+                ^ (round as u64).wrapping_mul(0xA076_1D64_78BD_642F);
+            let sig = SignatureRecovery::new(
+                domain,
+                capacity,
+                cfg.degree,
+                cfg.oversampling,
+                seed,
+            );
             if cfg.identity_fallback && sig.rows() >= domain {
                 (
                     BinaryRecoveryMatrix::identity(domain),
@@ -1204,8 +1166,12 @@ fn build_recovery_matrix(
             }
         }
         RecoveryBackend::Moment(cfg) => {
-            let seed = cfg.seed ^ salt ^ (round as u64).wrapping_mul(0xA076_1D64_78BD_642F);
-            let moment = MomentRecovery::new(domain, capacity, cfg.degree, cfg.oversampling, seed);
+            let seed = cfg.seed
+                ^ salt
+                ^ (round as u64).wrapping_mul(0xA076_1D64_78BD_642F);
+            let moment = MomentRecovery::new(
+                domain, capacity, cfg.degree, cfg.oversampling, seed,
+            );
             if cfg.identity_fallback && moment.rows() >= domain {
                 (
                     BinaryRecoveryMatrix::identity(domain),
@@ -1231,17 +1197,20 @@ fn build_recovery_matrix(
                     RecoveryMatrixKey::Identity { domain },
                 );
             }
-            let estimated = GuvParameters::estimated_rows(domain, capacity, cfg.alpha, cfg.epsilon);
+            let estimated = GuvParameters::estimated_rows(
+                domain,
+                capacity,
+                cfg.alpha,
+                cfg.epsilon,
+            );
             if cfg.identity_fallback && estimated >= domain {
                 return (
                     BinaryRecoveryMatrix::identity(domain),
                     RecoveryMatrixKey::Identity { domain },
                 );
             }
-            let guv =
-                GuvRecovery::new(domain, capacity, cfg.alpha, cfg.epsilon).unwrap_or_else(|e| {
-                    panic!("failed to construct explicit GUV recovery matrix: {e}")
-                });
+            let guv = GuvRecovery::new(domain, capacity, cfg.alpha, cfg.epsilon)
+                .unwrap_or_else(|e| panic!("failed to construct explicit GUV recovery matrix: {e}"));
             if cfg.identity_fallback && guv.rows() >= domain {
                 (
                     BinaryRecoveryMatrix::identity(domain),
@@ -1270,9 +1239,8 @@ pub fn left_recovery_sketch(a: &CsrMatrix, h: &BinaryRecoveryMatrix) -> DenseMat
     }
 
     let mut out = DenseMatrix::zeros(h.rows(), a.cols);
-    let rows_by_index: Vec<Vec<(usize, i64)>> = (0..h.domain())
-        .map(|i| h.weighted_rows_for_index(i))
-        .collect();
+    let rows_by_index: Vec<Vec<(usize, i64)>> =
+        (0..h.domain()).map(|i| h.weighted_rows_for_index(i)).collect();
     for i in 0..a.rows {
         let measurement_rows = &rows_by_index[i];
         for (k, value) in a.row(i) {
@@ -1295,9 +1263,8 @@ pub fn right_recovery_sketch(b: &CsrMatrix, g: &BinaryRecoveryMatrix) -> DenseMa
     // Cache the column mapping once. In CSR traversal the same output column j
     // can occur in many B rows, so recomputing rows_for_index(j) inside the nnz
     // loop caused a large amount of hashing/allocation work in v0.4.
-    let rows_by_column: Vec<Vec<(usize, i64)>> = (0..g.domain())
-        .map(|j| g.weighted_rows_for_index(j))
-        .collect();
+    let rows_by_column: Vec<Vec<(usize, i64)>> =
+        (0..g.domain()).map(|j| g.weighted_rows_for_index(j)).collect();
     for k in 0..b.rows {
         for (j, value) in b.row(k) {
             for &(mr, coeff) in &rows_by_column[j] {
@@ -1366,11 +1333,7 @@ pub fn safe_decode_scalar(
                     out.push((i, v));
                 }
             }
-            if out.len() <= capacity {
-                out
-            } else {
-                Vec::new()
-            }
+            if out.len() <= capacity { out } else { Vec::new() }
         }
         BinaryRecoveryMatrix::Signature(sig) => {
             expander_safe_decode_scalar(sig, measurement, capacity)
@@ -1378,7 +1341,9 @@ pub fn safe_decode_scalar(
         BinaryRecoveryMatrix::Moment(moment) => {
             moment_safe_decode_scalar(moment, measurement, capacity)
         }
-        BinaryRecoveryMatrix::Guv(guv) => expander_safe_decode_scalar(guv, measurement, capacity),
+        BinaryRecoveryMatrix::Guv(guv) => {
+            expander_safe_decode_scalar(guv, measurement, capacity)
+        }
     }
 }
 
@@ -1404,11 +1369,7 @@ pub fn safe_decode_product(
                     out.push((j, col));
                 }
             }
-            if out.len() <= capacity {
-                out
-            } else {
-                Vec::new()
-            }
+            if out.len() <= capacity { out } else { Vec::new() }
         }
         BinaryRecoveryMatrix::Signature(sig) => {
             expander_safe_decode_product(sig, measurement, capacity)
@@ -1416,7 +1377,9 @@ pub fn safe_decode_product(
         BinaryRecoveryMatrix::Moment(moment) => {
             moment_safe_decode_product(moment, measurement, capacity)
         }
-        BinaryRecoveryMatrix::Guv(guv) => expander_safe_decode_product(guv, measurement, capacity),
+        BinaryRecoveryMatrix::Guv(guv) => {
+            expander_safe_decode_product(guv, measurement, capacity)
+        }
     }
 }
 
@@ -1539,7 +1502,10 @@ fn moment_safe_decode_product(
         sub_assign_dense(&mut residual, &measured);
     }
 
-    let out: Vec<(usize, Vec<i64>)> = total.into_iter().filter(|(_, v)| !is_zero_vec(v)).collect();
+    let out: Vec<(usize, Vec<i64>)> = total
+        .into_iter()
+        .filter(|(_, v)| !is_zero_vec(v))
+        .collect();
     if out.len() > capacity || measure_product_moment(moment, original.rows, &out) != original {
         return Vec::new();
     }
@@ -1732,7 +1698,10 @@ fn expander_safe_decode_product<E: ExpanderSignature>(
         sub_assign_dense(&mut residual, &measured);
     }
 
-    let out: Vec<(usize, Vec<i64>)> = total.into_iter().filter(|(_, v)| !is_zero_vec(v)).collect();
+    let out: Vec<(usize, Vec<i64>)> = total
+        .into_iter()
+        .filter(|(_, v)| !is_zero_vec(v))
+        .collect();
     if out.len() > capacity {
         return Vec::new();
     }
@@ -1980,7 +1949,11 @@ impl SparseColumns {
         changed
     }
 
-    fn two_sided_measure(&self, h: &BinaryRecoveryMatrix, g: &BinaryRecoveryMatrix) -> DenseMatrix {
+    fn two_sided_measure(
+        &self,
+        h: &BinaryRecoveryMatrix,
+        g: &BinaryRecoveryMatrix,
+    ) -> DenseMatrix {
         assert_eq!(h.domain(), self.rows);
         assert_eq!(g.domain(), self.cols);
         let mut out = DenseMatrix::zeros(h.rows(), g.rows());
@@ -2219,15 +2192,7 @@ mod tests {
         let moment = MomentRecovery::new(256, 8, 3, 3.0, 0x1234_5678);
         assert_eq!(moment.rows(), 72);
         let h = BinaryRecoveryMatrix::Moment(moment.clone());
-        let x = vec![
-            (3, 5),
-            (17, -2),
-            (49, 7),
-            (88, 11),
-            (129, -3),
-            (173, 4),
-            (241, 9),
-        ];
+        let x = vec![(3, 5), (17, -2), (49, 7), (88, 11), (129, -3), (173, 4), (241, 9)];
         let y = measure_scalar_moment(&moment, &x);
         assert_eq!(safe_decode_scalar(&h, &y, 8), x);
     }
@@ -2271,10 +2236,9 @@ mod tests {
             },
         );
         assert_eq!(actual, expected);
-        assert!(
-            stats.scheduler_skipped_rounds > 0 || stats.rounds.iter().any(|r| r.masked_residual)
-        );
+        assert!(stats.scheduler_skipped_rounds > 0 || stats.rounds.iter().any(|r| r.masked_residual));
     }
+
 
     #[test]
     fn fingerprint_certifies_masked_recovery_without_exact_k() {
@@ -2306,10 +2270,7 @@ mod tests {
         );
         assert_eq!(actual, expected);
         assert!(stats.fingerprint_verified || stats.deterministic_verified);
-        assert!(stats
-            .fingerprint
-            .as_ref()
-            .map(|f| f.checks > 0)
-            .unwrap_or(false));
+        assert!(stats.fingerprint.as_ref().map(|f| f.checks > 0).unwrap_or(false));
     }
+
 }

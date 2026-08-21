@@ -29,7 +29,10 @@ pub fn spgemm_hash(a: &CsrMatrix, b: &CsrMatrix) -> (CsrMatrix, SpGemmStats) {
         triplets.extend(row.into_iter().map(|(j, v)| (i, j, v)));
     }
 
-    (CsrMatrix::from_triplets(a.rows, b.cols, &triplets), stats)
+    (
+        CsrMatrix::from_triplets(a.rows, b.cols, &triplets),
+        stats,
+    )
 }
 
 /// Straightforward dense rectangular GEMM. The inner loop skips zero entries in
