@@ -169,6 +169,22 @@ cargo run --example sprs --features sprs
 cargo run --example petgraph --features petgraph
 ```
 
+It also includes end-to-end throughput comparisons. The optional final
+argument is the measurement time per implementation in seconds:
+
+```bash
+cargo run --release --example benchmark-sprs --features sprs -- 2
+cargo run --release --example benchmark-petgraph --features petgraph -- 2
+```
+
+Each benchmark first checks that the standard ecosystem result and the
+`sketch-spgemm` result are identical. It then reports standard operations per
+second, `sketch-spgemm` operations per second, and their throughput ratio.
+The `sprs` comparison uses native CSR multiplication. The `petgraph` comparison
+uses direct weighted two-hop edge traversal. Both measurements are end to end,
+including output construction and, for `sketch-spgemm`, workload selection and
+adapter overhead.
+
 ### `sprs`
 
 The `sprs` feature accepts borrowed `CsMatViewI<'_, i64, I, Iptr>` operands and

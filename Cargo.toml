@@ -45,6 +45,16 @@ name = "petgraph"
 path = "examples/petgraph.rs"
 required-features = ["petgraph"]
 
+[[example]]
+name = "benchmark-sprs"
+path = "examples/benchmark_sprs.rs"
+required-features = ["sprs"]
+
+[[example]]
+name = "benchmark-petgraph"
+path = "examples/benchmark_petgraph.rs"
+required-features = ["petgraph"]
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
