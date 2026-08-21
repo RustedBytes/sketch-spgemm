@@ -1,43 +1,143 @@
-# SketchSpGEMM v0.7.1 — low-overhead automatic execution
+# SketchSpGEMM
 
-Research prototype inspired by Graia, **Optimal Deterministic Fully Sparse Matrix Multiplication** (arXiv:2608.18496), with practical moment/IBLT-style recovery derived from the nested sparse-recovery architecture.
+Adaptive, sketch-based sparse matrix multiplication in Rust.
 
-v0.7.1 is an overhead-reduction release. v0.7 already selected the correct sketch strategy without true `K`, but on the 256×512 sparse-output benchmark its automatic wrapper took ~43 ms versus ~17 ms for the hand-tuned sketch path. v0.7.1 targets that gap without changing the recovery mathematics.
+SketchSpGEMM is a research prototype for computing `C = A × B` when `A` and
+`B` are sparse, the ordinary multiplication exposes many candidate scalar
+products, and the final matrix `C` is much sparser than that intermediate work
+suggests. It automatically chooses between exact multiplication and compressed
+moment-sketch recovery, then checks a recovered result with independent
+residual fingerprints.
 
-## What is new in v0.7.1
+The project is inspired by Graia,
+[*Optimal Deterministic Fully Sparse Matrix Multiplication*](https://arxiv.org/abs/2608.18496),
+while its practical path uses an IBLT-style moment recovery strategy rather
+than being a literal implementation of the deterministic theorem.
 
-### 0. Low-overhead analysis and certification
+> [!IMPORTANT]
+> This is an exact-`i64` research implementation, not a general tensor library,
+> GPU kernel, or LLM inference engine. See [Limitations](#limitations).
 
-- Candidate-product counting remains a degree-only pass.
-- A structural amplification prefilter can choose exact execution without multiplying sampled rows.
-- Exact sampled rows now use a dense scratch accumulator plus touched-column list instead of a `HashMap`.
-- Sampling is staged: clearly bad workloads can stop early; sketch acceptance waits until the sample contains enough repeated column observations to make active-column inference identifiable.
-- Residual-fingerprint lanes are fused into one traversal of A and one traversal of B.
-- Arithmetic modulo `2^61-1` now uses Mersenne folding rather than generic 128-bit `%` in the hot multiply loop.
-- `AutoSpGEMMStats` reports analysis, candidate-count, row-sampling, nested, fingerprint-setup/check, and exact-fallback timings.
+## Why SketchSpGEMM?
 
-## v0.7 production features
+A conventional sparse matrix product may perform a large number of candidate
+multiplications even when relatively few nonzeros survive in the output. Define
 
-### 1. `AutoSpGEMM`
+```text
+F   = number of candidate scalar products
+K   = nnz(C)
+rho = F / K
+```
 
-New library API:
+When `rho` is large and the output is sparse, compressed measurements and
+sparse recovery can avoid materializing much of the intermediate work.
+SketchSpGEMM analyzes the input structure, samples output rows, predicts
+recovery cost, and selects the appropriate execution path without being given
+the true `K`.
+
+## Applications
+
+The algorithm is intended for exact sparse products with high candidate-product
+amplification and a sparse final result. Candidate application areas include:
+
+- **Graph analytics** — sparse two-hop relations, path-count products, and
+  signed or weighted graph composition when the resulting relation remains
+  sparse.
+- **Sparse relational joins** — incidence-matrix formulations of joins or
+  grouped aggregates where many input matches collapse into relatively few
+  output pairs.
+- **Incremental computation** — products such as `ΔA × B` or `A × ΔB` when a
+  sparse update affects only a small part of the result.
+- **Discrete scientific models** — composition of integer-valued incidence,
+  connectivity, boundary, or other sparse combinatorial operators.
+- **Sparse polynomial and combinatorial algebra** — exact integer products in
+  which many generated terms combine into a small output support.
+- **Sparse-recovery research** — experiments with sketch schedules, peeling
+  decoders, residual certification, and output-sensitive SpGEMM.
+
+These are workload shapes, not claims of production readiness. Measure the
+actual `F`, output geometry, recovery cost, and fallback rate for a particular
+dataset before choosing the sketch path.
+
+### Good fit
+
+- Exact integer arithmetic is acceptable.
+- Both inputs are sparse.
+- Candidate work is much larger than the number of output nonzeros.
+- Surviving output columns contain relatively few nonzeros.
+- Batch throughput matters more than single-operation latency.
+
+### Poor fit
+
+- The output is dense or nearly dense.
+- The candidate-product amplification ratio is small.
+- Floating-point, quantized, GPU, or distributed execution is required.
+- The workload is a dense neural-network layer or a full model-inference task.
+- A probabilistic certificate is unacceptable and exact correction is disabled.
+
+For unsuitable inputs, `auto_spgemm` can select an exact kernel rather than
+forcing sketch recovery.
+
+## Quick start
+
+Requirements:
+
+- Rust stable toolchain with Cargo
+
+Clone the repository, run the tests, and execute the default benchmark:
+
+```bash
+cargo test
+cargo run --release
+```
+
+### Library example
+
+```rust
+use sketch_spgemm::{auto_spgemm, AutoSpGemmConfig, CsrMatrix};
+
+fn main() {
+    let a = CsrMatrix::from_triplets(
+        2,
+        2,
+        &[(0, 0, 2), (0, 1, 3), (1, 1, 4)],
+    );
+    let b = CsrMatrix::from_triplets(
+        2,
+        2,
+        &[(0, 0, 5), (1, 0, 7), (1, 1, 11)],
+    );
+
+    let (c, stats) = auto_spgemm(&a, &b, AutoSpGemmConfig::default());
+
+    assert_eq!(c.to_dense().data, vec![31, 33, 28, 44]);
+    println!("selected path: {:?}", stats.choice);
+}
+```
+
+The main automatic API is:
 
 ```rust
 let (c, stats) = auto_spgemm(&a, &b, AutoSpGemmConfig::default());
 ```
 
-It does not receive the true output or true `nnz(C)`. It:
+It does not receive the true product or `nnz(C)`.
 
-1. computes the candidate-product count `F` in `O(nnz(A))` using B row degrees;
-2. applies a structural amplification prefilter, then exactly multiplies only as many evenly spaced A rows as needed;
-3. estimates output nnz, active output columns, average nnz per active column, output density, and `rho = F / estimated_nnz(C)`;
-4. predicts the moment-recovery row count at the likely useful `q`;
-5. chooses **exact** or **moment-sketch** execution;
-6. if sketch execution cannot obtain a residual certificate, optionally falls back to exact multiplication.
+## How automatic execution works
 
-The exact branch itself is adaptive: below `exact_dense_cell_limit` (16M total A+B+C dense cells by default) it uses the fast adaptive rectangular kernel; above that budget it stays in CSR and uses the hash SpGEMM path rather than forcing a dangerous dense materialization.
+`AutoSpGEMM`:
 
-The default selector prefers sketching only when all of these look favorable:
+1. Counts candidate products `F` from row degrees in `O(nnz(A))`.
+2. Applies a structural amplification prefilter.
+3. Exactly multiplies a staged sample of evenly spaced rows of `A`.
+4. Estimates output nonzeros, active columns, output density, and `rho`.
+5. Predicts the moment-recovery row count at a likely useful schedule point.
+6. Chooses exact execution or moment-sketch recovery.
+7. Certifies a recovered candidate with residual fingerprints.
+8. Optionally falls back to exact multiplication if certification fails.
+
+The default selector prefers sketching only when all of these conditions appear
+favorable:
 
 ```text
 estimated rho                 >= 256
@@ -46,52 +146,65 @@ estimated output density      <= 10%
 estimated moment rows / rows  <  80%
 ```
 
-These are engineering defaults, not theorem constants. They are configurable through `AutoSpGemmConfig`.
+These are configurable engineering defaults, not theorem constants.
 
-### 2. Independent residual fingerprint
+The exact branch is adaptive. Below `exact_dense_cell_limit`—16 million total
+`A + B + C` dense cells by default—it uses the adaptive rectangular kernel.
+Above that limit it remains in CSR and uses hash SpGEMM instead of forcing a
+large dense allocation.
 
-v0.7.1 can certify that a reconstructed candidate `D` satisfies `AB-D = 0` without knowing exact `K`.
+## Residual certification
 
-For each independent lane it chooses random field weights `r_i` and `s_j` modulo the Mersenne prime `2^61-1` and precomputes:
+SketchSpGEMM can test whether a reconstructed candidate `D` satisfies
+`AB - D = 0` without knowing the exact `K`.
+
+For each independent lane it selects random field weights `r_i` and `s_j`
+modulo the Mersenne prime `2^61 - 1` and computes:
 
 ```text
 phi(AB) = r^T A B s = (r^T A)(B s)
+phi(D)  = sum_(i,j in supp(D)) r_i * D_ij * s_j
 ```
 
-Verification then computes only:
+The candidate passes when `phi(D) == phi(AB)` in every lane. Target setup is
+linear in the input nonzeros, and candidate checking is linear in `nnz(D)`.
+Three independently seeded lanes are enabled by default.
 
-```text
-phi(D) = sum_(i,j in supp(D)) r_i * D_ij * s_j
-```
+This is a **probabilistic residual certificate**. Exact identity recovery and
+exact correction remain available when deterministic verification is required.
 
-and checks `phi(D) == phi(AB)`.
-
-The target fingerprint is linear in input nnz and checking a candidate is linear in `nnz(D)`. In v0.7.1 all lanes share one sparse traversal of A/B, and Mersenne reduction avoids generic integer division in the hot path. Three independently seeded lanes are the default. A zero seed requests a runtime-derived seed; tests use fixed seeds for reproducibility.
-
-This is a **probabilistic residual certificate**, not Graia's deterministic recovery theorem. Exact identity recovery and exact correction remain available when deterministic verification is required.
-
-CLI controls:
+Relevant CLI options:
 
 ```text
 --residual-fingerprint true|false
 --fingerprint-lanes N
---fingerprint-seed N     # 0 = runtime-derived
+--fingerprint-seed N     # 0 selects a runtime-derived seed
 ```
 
-### 3. Prepared rectangular factors
+## Recovery backends
 
-v0.6 repeatedly converted dense sketch factors into sparse row views inside the rectangular dispatcher. v0.7 introduced `PreparedFactor`:
+- `moment` — three-row-per-bucket algebraic moment peeling; the practical
+  default.
+- `signature` — deterministic SplitMix bucket graph with binary index
+  signatures.
+- `guv` — explicit Parvaresh–Vardy/GUV graph with a Bennett decoder.
+- `identity` — exact uncompressed recovery reference.
+
+The moment backend stores:
 
 ```text
-DenseMatrix
-  + cached sparse rows
-  + row nnz counts
-  + column nnz counts
+S0 = sum x_i
+S1 = sum (i + 1)x_i
+S2 = sum (i + 1)^2 x_i
 ```
 
-Recovery-factor caches now store prepared factors, so a reused `HA` or `BG^T` also reuses its sparse representation.
+It combines peeling with exact remeasurement, support masking, and an
+observed-geometry scheduler. Once outer recovery identifies residual output
+columns, later multiplication can restrict work to that unresolved support.
 
-`adaptive_matmul_prepared()` therefore chooses among:
+## Rectangular kernels
+
+`adaptive_matmul_prepared` selects among:
 
 ```text
 dense-blocked
@@ -100,32 +213,11 @@ sparse-right
 sparse-sparse
 ```
 
-without charging another full factor scan. The prepared auto policy applies a small 9/8 irregularity penalty to sparse×sparse traversal so a nearly-dense `HA` with a sparse masked `BG^T` tends to select the more cache-friendly sparse-right path.
+`PreparedFactor` caches sparse row views, row counts, and column counts so
+reused recovery factors do not pay repeated conversion costs. The one-shot
+`adaptive_matmul` API remains available for standalone and baseline use.
 
-The old one-shot `adaptive_matmul()` remains unchanged for standalone/exact baseline comparisons and still includes sparse-view construction cost.
-
-### 4. Loose K bound + tight scheduler hint
-
-The nested algorithm still needs a finite `K` bound to construct its paper-style schedule. `AutoSpGEMM` now separates:
-
-```text
-K bound supplied to schedule    = sampled estimate × safety factor
-scheduler K hint                = tighter sampled estimate
-```
-
-So the schedule can be conservative without forcing the practical q scheduler to jump too high.
-
-If the estimate is wrong, the residual fingerprint detects an incomplete result. `AutoSpGEMM` then falls back to exact multiplication when `exact_fallback=true`.
-
-## Recommended v0.7.1 benchmark
-
-First verify the crate:
-
-```bash
-cargo test
-```
-
-Then run the existing sparse-output workload with **no exact-K stop condition** and enable the production selector:
+## Recommended sparse-output benchmark
 
 ```bash
 cargo run --release -- \
@@ -153,103 +245,74 @@ cargo run --release -- \
   --repeats 5
 ```
 
-There are two useful outputs:
+A successful automatic run should report a sketch choice, a passing benchmark
+oracle check, a successful fingerprint certificate, and an estimated
+per-active-column output size near the configured single digits. The overlap
+workload with dense surviving columns should instead select exact execution.
 
-1. the explicit nested benchmark, which still receives `K=nnz(C)` as its schedule bound because the CLI is a research harness, but does **not** use it as an exact stop condition when `--exact-k-bound false`;
-2. the `AutoSpGEMM v0.7.1` section, which receives **no true K at all** and uses only sampled estimates + residual fingerprinting.
+The benchmark prints separate timings for analysis, candidate counting, row
+sampling, nested recovery, fingerprint setup and checks, and exact fallback.
 
-A successful auto result should look qualitatively like:
-
-```text
-AutoSpGEMM v0.7.1 (does not use true K):
-  choice: Sketch
-  exact product check (benchmark oracle): PASS
-  estimate: ... est-col-nnz around single digits ... q=8 ...
-  sketch certificate: fingerprint=true ...
-```
-
-For the old overlap workload with dense surviving columns, the selector should instead report `choice: Exact` because estimated per-column output sparsity/output density are too high.
-
-## Existing v0.6 practical path
-
-The moment backend remains:
+## Public API
 
 ```text
-3 rows / bucket:
-S0 = sum x_i
-S1 = sum (i+1)x_i
-S2 = sum (i+1)^2 x_i
+auto_spgemm(...)                   automatic exact/sketch selection
+analyze_workload(...)              workload estimator
+nested_spgemm(...)                 theorem-oriented control flow
+nested_spgemm_with_policy(...)     custom rectangular policy
+nested_spgemm_with_options(...)    engineering controls
+adaptive_matmul(...)               one-shot rectangular multiplication
+adaptive_matmul_prepared(...)      cached-factor rectangular multiplication
+spgemm_hash(...)                   exact CSR baseline
 ```
 
-with peeling, exact remeasurement, support masking, and the observed-geometry q scheduler.
+## What's new in v0.7.1
 
-Support masking still activates only after identity outer recovery exposes concrete residual output-column IDs. Successfully decoded moment columns are removed from the mask, so later multiplication touches only the unresolved tail.
+- Lower-overhead structural analysis and staged row sampling.
+- Dense scratch accumulation with touched-column tracking for sampled rows.
+- Fused residual-fingerprint lanes over one sparse traversal of each input.
+- Fast Mersenne reduction in place of generic 128-bit remainder operations.
+- Separate conservative schedule bounds and tighter scheduler hints.
+- Detailed timing fields in `AutoSpGemmStats`.
 
-## Recovery backends
+## Limitations
 
-- `moment` — 3-row/bucket algebraic moment peeling; practical default.
-- `signature` — deterministic SplitMix bucket graph + binary index signatures.
-- `guv` — explicit Parvaresh–Vardy/GUV graph + Bennett decoder.
-- `identity` — exact uncompressed recovery reference.
-
-## Main APIs
-
-```rust
-// theorem/control-flow oriented
-nested_spgemm(...)
-nested_spgemm_with_policy(...)
-
-// engineering controls
-nested_spgemm_with_options(...)
-
-// v0.7.1 production-oriented wrapper
-auto_spgemm(...)
-analyze_workload(...)
-
-// rectangular kernels
-adaptive_matmul(...)
-adaptive_matmul_prepared(...)
-```
+- Matrices store exact signed 64-bit integers only.
+- Arithmetic overflow is not converted into a recoverable error.
+- Execution is CPU-only and currently single-process.
+- There are no CUDA, Metal, distributed, or production storage integrations.
+- The practical moment/fingerprint path is probabilistic rather than the
+  deterministic theorem from the motivating paper.
+- Performance depends strongly on output geometry. Sparse inputs alone do not
+  imply that sketch recovery will be beneficial.
+- The CLI is a research and benchmark harness, not a production service.
 
 ## Source layout
 
 ```text
 src/
-├── auto.rs        workload sampling + exact/sketch selection
-├── fingerprint.rs bilinear residual certificate over 2^61-1
+├── auto.rs        workload sampling and exact/sketch selection
+├── fingerprint.rs bilinear residual certificate over 2^61 - 1
 ├── guv.rs         explicit GUV finite-field construction
-├── recovery.rs    nested recovery, moment/signature/GUV, masks, scheduler, caches
-├── rect.rs        one-shot + prepared adaptive rectangular multiplication
-├── sketch.rs      cheap probe and Graia q/p/t schedule
+├── matrix.rs      CSR and dense integer matrix primitives
+├── recovery.rs    recovery backends, masks, schedulers, and caches
+├── rect.rs        adaptive rectangular kernels and prepared factors
+├── sketch.rs      probes and the Graia q/p/t schedule
 ├── spgemm.rs      hash baseline and simple dense kernel
-├── matrix.rs      CSR/dense primitives
-├── synthetic.rs   overlap + Walsh-Hadamard sparse-output generators
-├── lib.rs
+├── synthetic.rs   synthetic sparse-output workloads
+├── lib.rs         public library exports
 └── main.rs        benchmark CLI
 ```
 
-## Research boundary
+## Project status
 
-The winning practical path is no longer a literal implementation of the deterministic theorem. It combines:
+SketchSpGEMM is suitable for research, reproducible experiments, and evaluation
+of high-amplification sparse products. It should be benchmarked and validated on
+representative data before being embedded into a larger system.
 
-```text
-outer support discovery
-+ column masking
-+ moment-hash inner recovery
-+ practical q scheduling
-+ randomized residual fingerprinting
-+ exact fallback when certification fails
-```
+Contributions are welcome, particularly around generic arithmetic, parallel
+kernels, additional datasets, property testing, and reproducible benchmarks.
 
-The GUV backend remains available for theorem-oriented experiments. The purpose of the v0.7.1 path is different: turn the paper's compressed-recovery architecture into a useful adaptive SpGEMM strategy on workloads where candidate-product amplification is extreme but the true output is column-sparse.
+## License
 
-
-## v0.7.1 timing output
-
-The Auto section now includes a line similar to:
-
-```text
-auto timing: analysis=... [candidate=..., sampling=...], nested=..., fp-setup=..., fp-checks=..., exact=...
-```
-
-This is intentionally exposed so selector/certificate overhead can be compared with the actual nested recovery time rather than hidden inside one total.
+The crate manifest declares `MIT OR Apache-2.0`.
