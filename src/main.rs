@@ -1,7 +1,8 @@
 use sketch_spgemm::{
-    adaptive_matmul, direct_two_sided_sketch, left_sketch, nested_spgemm_with_options,
-    overlap_problem, paper_schedule, right_sketch, sparse_output_problem, spgemm_hash, GuvConfig,
-    CsrMatrix, MomentConfig, NestedOptions, RecoveryBackend, RectangularPolicy, SignatureConfig, SketchMap,
+    adaptive_matmul, auto_spgemm, direct_two_sided_sketch, left_sketch, nested_spgemm_with_options,
+    overlap_problem, paper_schedule, right_sketch, sparse_output_problem, spgemm_hash, AutoSpGemmConfig,
+    FingerprintConfig, GuvConfig, CsrMatrix, MomentConfig, NestedOptions, RecoveryBackend,
+    RectangularPolicy, SignatureConfig, SketchMap,
 };
 use std::env;
 use std::time::{Duration, Instant};
@@ -31,6 +32,11 @@ struct Config {
     practical_scheduler: bool,
     masked_residual: bool,
     exact_k_bound: bool,
+    residual_fingerprint: bool,
+    fingerprint_lanes: usize,
+    fingerprint_seed: u64,
+    auto_select: bool,
+    auto_sample_rows: usize,
     rectangular_policy: RectangularPolicy,
 }
 
@@ -60,6 +66,11 @@ impl Default for Config {
             practical_scheduler: true,
             masked_residual: true,
             exact_k_bound: true,
+            residual_fingerprint: true,
+            fingerprint_lanes: 3,
+            fingerprint_seed: 0,
+            auto_select: false,
+            auto_sample_rows: 8,
             rectangular_policy: RectangularPolicy::Auto,
         }
     }
@@ -67,7 +78,7 @@ impl Default for Config {
 
 fn main() {
     let cfg = parse_args();
-    println!("SketchSpGEMM practical nested-recovery prototype v0.6");
+    println!("SketchSpGEMM adaptive production prototype v0.7");
     println!("config: {cfg:?}\n");
 
     let problem = match cfg.synthetic.as_str() {
@@ -245,8 +256,14 @@ fn main() {
             NestedOptions {
                 rectangular_policy: cfg.rectangular_policy,
                 practical_scheduler: cfg.practical_scheduler,
+                scheduler_k_hint: None,
                 masked_residual: cfg.masked_residual,
                 exact_k_bound: cfg.exact_k_bound,
+                residual_fingerprint: cfg.residual_fingerprint.then_some(FingerprintConfig {
+                    lanes: cfg.fingerprint_lanes,
+                    seed: cfg.fingerprint_seed,
+                }),
+                fingerprint_failure_correction: false,
             },
         );
         let nested_t = start.elapsed();
@@ -317,9 +334,57 @@ fn main() {
             );
         }
 
+        if let Some(fp) = &nested_stats.fingerprint {
+            println!(
+                "  residual fingerprint: lanes={}, checks={}, pass={}, fail={}, verified={}, setup={}, checks-time={}",
+                fp.lanes, fp.checks, fp.passes, fp.failures, nested_stats.fingerprint_verified,
+                fmt_duration(nested_stats.fingerprint_setup_time),
+                fmt_duration(nested_stats.fingerprint_check_time),
+            );
+        }
+
         if !exact && cfg.guaranteed_correction {
             panic!("guaranteed correction was enabled but nested result was not exact");
         }
+    }
+
+    if cfg.auto_select {
+        let auto_cfg = AutoSpGemmConfig {
+            sample_rows: cfg.auto_sample_rows,
+            rectangular_policy: cfg.rectangular_policy,
+            moment: MomentConfig {
+                degree: cfg.recovery_degree,
+                oversampling: cfg.recovery_oversampling,
+                seed: 0x4D4F_4D45_4E54_0001,
+                identity_fallback: cfg.identity_fallback,
+                guaranteed_correction: false,
+            },
+            fingerprint: FingerprintConfig { lanes: cfg.fingerprint_lanes, seed: cfg.fingerprint_seed },
+            ..AutoSpGemmConfig::default()
+        };
+        let start = Instant::now();
+        let (auto_result, auto_stats) = auto_spgemm(&problem.a, &problem.b, auto_cfg);
+        let auto_time = start.elapsed();
+        println!("\nAutoSpGEMM v0.7 (does not use true K):");
+        println!("  total: {}", fmt_duration(auto_time));
+        println!("  choice: {:?}", auto_stats.choice);
+        println!("  exact product check (benchmark oracle): {}", if auto_result == c { "PASS" } else { "FAIL" });
+        println!("  K estimate/bound: {} / {}", auto_stats.estimate.estimated_output_nnz, auto_stats.k_bound_used);
+        println!(
+            "  estimate: sample-rows={}, sample-nnz={}, observed-cols={}, est-active-cols={}, est-col-nnz={:.2}, est-rho={:.1}, est-density={:.4}, q={}, moment-rows={}",
+            auto_stats.estimate.sampled_rows, auto_stats.estimate.sampled_output_nnz,
+            auto_stats.estimate.sampled_unique_columns, auto_stats.estimate.estimated_active_columns,
+            auto_stats.estimate.estimated_avg_nnz_per_active_column, auto_stats.estimate.estimated_rho,
+            auto_stats.estimate.estimated_output_density, auto_stats.estimate.target_q,
+            auto_stats.estimate.estimated_moment_rows,
+        );
+        println!("  decision reason: {}", auto_stats.estimate.reason);
+        if let Some(nested) = &auto_stats.nested {
+            println!("  sketch certificate: fingerprint={}, deterministic={}, rounds={}, skipped={}",
+                nested.fingerprint_verified, nested.deterministic_verified, nested.rounds.len(), nested.scheduler_skipped_rounds);
+        }
+        if let Some(method) = auto_stats.exact_method { println!("  exact method: {:?}", method); }
+        if let Some(reason) = &auto_stats.fallback_reason { println!("  fallback: {reason}"); }
     }
 
     println!("\nScope note:");
@@ -331,8 +396,8 @@ fn main() {
     println!("  With --identity-fallback true, literal GUV constants often select I_N;");
     println!("  this is expected and follows the recovery theorem's smaller-row fallback.");
     println!("  --guaranteed-correction true adds a validation-only exact residual pass.");
-    println!("  v0.6 adds support-masked residual multiplication and an observed-geometry q scheduler.");
-    println!("  v0.6 keeps v0.5 caches for repeated HA, BG^T, HABG^T and W.");
+    println!("  v0.7 adds residual fingerprints, prepared sparse factor views, and AutoSpGEMM selection.");
+    println!("  support masking, practical q scheduling, and v0.5 cache hierarchy remain enabled.");
     println!("  --rect-kernel auto dispatches dense/sparse rectangular multiplication per round.");
 }
 
@@ -433,6 +498,11 @@ fn parse_args() -> Config {
             "--practical-scheduler" => cfg.practical_scheduler = parse_bool(&value),
             "--masked-residual" => cfg.masked_residual = parse_bool(&value),
             "--exact-k-bound" => cfg.exact_k_bound = parse_bool(&value),
+            "--residual-fingerprint" => cfg.residual_fingerprint = parse_bool(&value),
+            "--fingerprint-lanes" => cfg.fingerprint_lanes = value.parse().unwrap(),
+            "--fingerprint-seed" => cfg.fingerprint_seed = value.parse().unwrap(),
+            "--auto-select" => cfg.auto_select = parse_bool(&value),
+            "--auto-sample-rows" => cfg.auto_sample_rows = value.parse().unwrap(),
             "--rect-kernel" => cfg.rectangular_policy = value.parse().unwrap(),
             _ => panic!("unknown flag: {flag}"),
         }
@@ -473,5 +543,10 @@ fn print_help() {
     println!("  --practical-scheduler BOOL  jump q from observed residual geometry (default true)");
     println!("  --masked-residual BOOL      restrict later B work to observed live columns (default true)");
     println!("  --exact-k-bound BOOL        treat benchmark K as exact nnz(C) (default true)");
+    println!("  --residual-fingerprint BOOL verify AB-D without exact K (default true)");
+    println!("  --fingerprint-lanes N       independent Mersenne-field checks (default 3)");
+    println!("  --fingerprint-seed N        0=random runtime seed; nonzero=reproducible");
+    println!("  --auto-select BOOL          run production AutoSpGEMM selector (default false)");
+    println!("  --auto-sample-rows N        exact rows sampled by auto estimator (default 8)");
     println!("  --rect-kernel MODE          auto|dense|sparse-left|sparse-right|sparse-sparse (default auto)");
 }

@@ -1,8 +1,8 @@
 [package]
 name = "sketch-spgemm"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
-description = "Practical nested sparse-recovery SpGEMM with moment peeling, support masking, and adaptive scheduling"
+description = "Adaptive SketchSpGEMM with moment recovery, masking, fingerprints, and automatic exact/sketch selection"
 license = "MIT OR Apache-2.0"
 
 [profile.release]

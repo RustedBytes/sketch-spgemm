@@ -1,7 +1,8 @@
+use crate::fingerprint::{FingerprintConfig, FingerprintStats, ResidualFingerprint};
 use crate::guv::{GuvConfig, GuvParameters, GuvRecovery};
 use crate::matrix::{CsrMatrix, DenseMatrix};
 use crate::sketch::{paper_schedule, RoundParams};
-use crate::rect::{adaptive_matmul, RectangularKernel, RectangularPolicy, RectangularStats};
+use crate::rect::{adaptive_matmul_prepared, PreparedFactor, RectangularKernel, RectangularPolicy, RectangularStats};
 use crate::spgemm::dense_matmul;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -391,12 +392,23 @@ pub struct NestedOptions {
     /// number of live residual columns, skip q-levels below the next power of
     /// two of K_remaining / live_columns.
     pub practical_scheduler: bool,
+    /// Optional output-nnz estimate used only by the practical q scheduler.
+    /// This lets AutoSpGEMM keep a conservative K bound while scheduling from
+    /// a tighter sampled estimate.
+    pub scheduler_k_hint: Option<usize>,
     /// Engineering support mask: after identity outer recovery exposes concrete
     /// column ids, restrict later B/G work to those observed residual columns.
     pub masked_residual: bool,
     /// Marks k_bound as the exact nnz(C), rather than merely an upper bound.
     /// Used only for practical support-completeness checks/safety fallback.
     pub exact_k_bound: bool,
+    /// Optional independent bilinear residual certificate. When enabled, an
+    /// exhausted support mask can be accepted without knowing exact K.
+    pub residual_fingerprint: Option<FingerprintConfig>,
+    /// If a fingerprint-enabled run reaches the end without a valid residual
+    /// certificate, append an exact correction pass. AutoSpGEMM normally keeps
+    /// this false and performs an explicit exact fallback at the wrapper level.
+    pub fingerprint_failure_correction: bool,
 }
 
 impl Default for NestedOptions {
@@ -404,8 +416,11 @@ impl Default for NestedOptions {
         Self {
             rectangular_policy: RectangularPolicy::Auto,
             practical_scheduler: false,
+            scheduler_k_hint: None,
             masked_residual: false,
             exact_k_bound: false,
+            residual_fingerprint: None,
+            fingerprint_failure_correction: false,
         }
     }
 }
@@ -417,6 +432,11 @@ pub struct NestedSpGemmStats {
     pub terminated_early: bool,
     pub termination_reason: Option<String>,
     pub scheduler_skipped_rounds: usize,
+    pub fingerprint: Option<FingerprintStats>,
+    pub fingerprint_setup_time: Duration,
+    pub fingerprint_check_time: Duration,
+    pub fingerprint_verified: bool,
+    pub deterministic_verified: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -497,7 +517,7 @@ pub fn nested_spgemm_with_policy(
     )
 }
 
-/// v0.6 engineering entry point. The theorem-pure behavior is obtained with
+/// v0.7 engineering entry point. The theorem-pure behavior is obtained with
 /// `NestedOptions::default()`. Practical scheduling and support masking are
 /// explicitly opt-in at the library level; the benchmark CLI enables them by
 /// default so their effect is visible.
@@ -523,15 +543,26 @@ pub fn nested_spgemm_with_options(
     let mut stats = NestedSpGemmStats::default();
     let mut support_mask: Option<Vec<bool>> = None;
     let mut scheduler_target_q = 0usize;
+    let fingerprint = options.residual_fingerprint.map(|cfg| {
+        let start = Instant::now();
+        let fp = ResidualFingerprint::new(a, b, cfg);
+        stats.fingerprint_setup_time = start.elapsed();
+        stats.fingerprint = Some(FingerprintStats {
+            lanes: fp.lanes(),
+            seed: fp.seed,
+            ..FingerprintStats::default()
+        });
+        fp
+    });
 
-    // v0.6 cache hierarchy:
+    // v0.7 cache hierarchy:
     //   recovery matrix -> H*A / B*G^T -> H*A*B*G^T -> residual W for one D version.
     // Round-reseeded Signature/Moment matrices are not cached, while identity/GUV
     // factors and products are reused. A support-masked B factor is deliberately
     // round-local because the mask changes as columns are recovered.
     let mut recovery_matrix_cache: HashMap<RecoveryMatrixKey, BinaryRecoveryMatrix> = HashMap::new();
-    let mut left_factor_cache: HashMap<RecoveryMatrixKey, Arc<DenseMatrix>> = HashMap::new();
-    let mut right_factor_cache: HashMap<RecoveryMatrixKey, Arc<DenseMatrix>> = HashMap::new();
+    let mut left_factor_cache: HashMap<RecoveryMatrixKey, Arc<PreparedFactor>> = HashMap::new();
+    let mut right_factor_cache: HashMap<RecoveryMatrixKey, Arc<PreparedFactor>> = HashMap::new();
     let mut product_cache: HashMap<(RecoveryMatrixKey, RecoveryMatrixKey), CachedProduct> = HashMap::new();
     let mut residual_cache: HashMap<ResidualCacheKey, CachedResidual> = HashMap::new();
 
@@ -602,12 +633,12 @@ pub fn nested_spgemm_with_options(
             left_time = elapsed;
 
             let start = Instant::now();
-            let bgt = right_recovery_sketch_masked(b, &g, active_mask.unwrap());
+            let bgt = PreparedFactor::new(right_recovery_sketch_masked(b, &g, active_mask.unwrap()));
             right_time = start.elapsed();
             bgt_cache_hit = false;
 
             let start = Instant::now();
-            let (hcgt, rect_stats) = adaptive_matmul(&ha, &bgt, options.rectangular_policy);
+            let (hcgt, rect_stats) = adaptive_matmul_prepared(&ha, &bgt, options.rectangular_policy);
             rectangular_time = start.elapsed();
 
             let start = Instant::now();
@@ -647,7 +678,7 @@ pub fn nested_spgemm_with_options(
                     right_time = elapsed;
 
                     let start = Instant::now();
-                    let (product, rect_stats) = adaptive_matmul(&ha, &bgt, options.rectangular_policy);
+                    let (product, rect_stats) = adaptive_matmul_prepared(&ha, &bgt, options.rectangular_policy);
                     rectangular_time = start.elapsed();
                     let product = Arc::new(product);
                     product_cache.insert(
@@ -693,7 +724,7 @@ pub fn nested_spgemm_with_options(
             right_time = elapsed;
 
             let start = Instant::now();
-            let (hcgt, rect_stats) = adaptive_matmul(&ha, &bgt, options.rectangular_policy);
+            let (hcgt, rect_stats) = adaptive_matmul_prepared(&ha, &bgt, options.rectangular_policy);
             rectangular_time = start.elapsed();
 
             let start = Instant::now();
@@ -767,7 +798,8 @@ pub fn nested_spgemm_with_options(
         if options.practical_scheduler && g.is_identity() {
             let observed = remaining_mask_columns.max(if support_mask.is_none() { outer_recovered } else { 0 });
             if observed > 0 {
-                let remaining_bound = k.saturating_sub(d.nnz()).max(1);
+                let scheduler_k = options.scheduler_k_hint.unwrap_or(k);
+                let remaining_bound = scheduler_k.saturating_sub(d.nnz()).max(1);
                 let avg = remaining_bound.saturating_add(observed - 1) / observed;
                 let target = avg.max(1).next_power_of_two().min(r.max(1));
                 scheduler_target_q = scheduler_target_q.max(target);
@@ -819,6 +851,7 @@ pub fn nested_spgemm_with_options(
         });
 
         if certified_zero_residual {
+            stats.deterministic_verified = true;
             stats.terminated_early = true;
             stats.termination_reason = Some(format!(
                 "identity residual certificate W=0 at round {}",
@@ -828,12 +861,46 @@ pub fn nested_spgemm_with_options(
         }
 
         if complete_identity_recovery {
+            stats.deterministic_verified = true;
             stats.terminated_early = true;
             stats.termination_reason = Some(format!(
                 "complete identity residual recovery at round {}",
                 params.i
             ));
             break;
+        }
+
+        // v0.7: an exhausted observed support can be certified without exact K
+        // by an independent bilinear fingerprint of AB-D. A failed certificate
+        // discards the mask so later rounds can rediscover residual support.
+        let mask_exhausted = support_mask
+            .as_ref()
+            .map(|m| !m.iter().any(|&x| x))
+            .unwrap_or(false);
+        if options.masked_residual && mask_exhausted {
+            if let Some(fp) = fingerprint.as_ref() {
+                let start = Instant::now();
+                let candidate = d.to_csr();
+                let passed = fp.verifies(&candidate);
+                stats.fingerprint_check_time += start.elapsed();
+                if let Some(fps) = stats.fingerprint.as_mut() {
+                    fps.checks += 1;
+                    if passed { fps.passes += 1; } else { fps.failures += 1; }
+                }
+                if passed {
+                    stats.fingerprint_verified = true;
+                    stats.terminated_early = true;
+                    stats.termination_reason = Some(format!(
+                        "residual fingerprint certified AB-D=0 in round {}",
+                        params.i
+                    ));
+                    break;
+                } else {
+                    // A failed independent certificate overrides support/nnz
+                    // heuristics: rediscover residual columns on later rounds.
+                    support_mask = None;
+                }
+            }
         }
 
         // In exact-K benchmark mode, exhausting the observed support with exactly
@@ -843,6 +910,7 @@ pub fn nested_spgemm_with_options(
             && support_mask.as_ref().map(|m| !m.iter().any(|&x| x)).unwrap_or(false)
             && d.nnz() == k
         {
+            stats.deterministic_verified = true;
             stats.terminated_early = true;
             stats.termination_reason = Some(format!(
                 "observed residual support exhausted at exact K in round {}",
@@ -861,6 +929,27 @@ pub fn nested_spgemm_with_options(
         }
     }
 
+    // Final fingerprint opportunity even when the support mask did not become
+    // empty on the last scheduled round. This is especially useful when K was
+    // only an estimate and the decoder nevertheless reconstructed the product.
+    if !stats.fingerprint_verified && !stats.deterministic_verified {
+        if let Some(fp) = fingerprint.as_ref() {
+            let start = Instant::now();
+            let candidate = d.to_csr();
+            let passed = fp.verifies(&candidate);
+            stats.fingerprint_check_time += start.elapsed();
+            if let Some(fps) = stats.fingerprint.as_mut() {
+                fps.checks += 1;
+                if passed { fps.passes += 1; } else { fps.failures += 1; }
+            }
+            if passed {
+                stats.fingerprint_verified = true;
+                stats.terminated_early = true;
+                stats.termination_reason = Some("final residual fingerprint certified AB-D=0".to_string());
+            }
+        }
+    }
+
     let guaranteed_correction = match &backend {
         RecoveryBackend::Identity => false,
         RecoveryBackend::Signature(cfg) => cfg.guaranteed_correction,
@@ -868,7 +957,11 @@ pub fn nested_spgemm_with_options(
         RecoveryBackend::Guv(cfg) => cfg.guaranteed_correction,
     };
     let exact_k_safety = options.masked_residual && options.exact_k_bound && d.nnz() != k;
-    if guaranteed_correction || exact_k_safety {
+    let fingerprint_safety = options.residual_fingerprint.is_some()
+        && (options.fingerprint_failure_correction || options.exact_k_bound)
+        && !stats.fingerprint_verified
+        && !stats.deterministic_verified;
+    if guaranteed_correction || exact_k_safety || fingerprint_safety {
         let start = Instant::now();
         let h = BinaryRecoveryMatrix::identity(r);
         let g = BinaryRecoveryMatrix::identity(c);
@@ -901,16 +994,17 @@ pub fn nested_spgemm_with_options(
             residual_nnz,
             elapsed: start.elapsed(),
         });
+        stats.deterministic_verified = true;
     }
 
     (d.to_csr(), stats)
 }
 
 fn get_or_build_factor<F>(
-    cache: &mut HashMap<RecoveryMatrixKey, Arc<DenseMatrix>>,
+    cache: &mut HashMap<RecoveryMatrixKey, Arc<PreparedFactor>>,
     key: &RecoveryMatrixKey,
     build: F,
-) -> (Arc<DenseMatrix>, bool, Duration)
+) -> (Arc<PreparedFactor>, bool, Duration)
 where
     F: FnOnce() -> DenseMatrix,
 {
@@ -921,7 +1015,7 @@ where
     }
 
     let start = Instant::now();
-    let matrix = Arc::new(build());
+    let matrix = Arc::new(PreparedFactor::new(build()));
     let elapsed = start.elapsed();
     if key.cacheable() {
         cache.insert(key.clone(), matrix.clone());
@@ -2135,12 +2229,48 @@ mod tests {
             NestedOptions {
                 rectangular_policy: RectangularPolicy::Auto,
                 practical_scheduler: true,
+                scheduler_k_hint: None,
                 masked_residual: true,
                 exact_k_bound: true,
+                ..NestedOptions::default()
             },
         );
         assert_eq!(actual, expected);
         assert!(stats.scheduler_skipped_rounds > 0 || stats.rounds.iter().any(|r| r.masked_residual));
+    }
+
+
+    #[test]
+    fn fingerprint_certifies_masked_recovery_without_exact_k() {
+        use crate::fingerprint::FingerprintConfig;
+        let problem = sparse_output_problem(128, 256, 128, 32, 5, 0.5, 256);
+        let (expected, _) = spgemm_hash(&problem.a, &problem.b);
+        let cfg = MomentConfig {
+            degree: 3,
+            oversampling: 3.0,
+            seed: 0x4D4F_4D45_4E54_0001,
+            identity_fallback: true,
+            guaranteed_correction: false,
+        };
+        // Deliberately use a loose upper bound rather than exact nnz(C).
+        let (actual, stats) = nested_spgemm_with_options(
+            &problem.a,
+            &problem.b,
+            expected.nnz() * 2,
+            RecoveryBackend::Moment(cfg),
+            NestedOptions {
+                rectangular_policy: RectangularPolicy::Auto,
+                practical_scheduler: true,
+                scheduler_k_hint: Some(expected.nnz()),
+                masked_residual: true,
+                exact_k_bound: false,
+                residual_fingerprint: Some(FingerprintConfig { lanes: 3, seed: 99 }),
+                fingerprint_failure_correction: false,
+            },
+        );
+        assert_eq!(actual, expected);
+        assert!(stats.fingerprint_verified || stats.deterministic_verified);
+        assert!(stats.fingerprint.as_ref().map(|f| f.checks > 0).unwrap_or(false));
     }
 
 }

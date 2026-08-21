@@ -1,115 +1,119 @@
-# SketchSpGEMM v0.6 — moment peeling + masked residual multiplication
+# SketchSpGEMM v0.7 — adaptive execution + residual fingerprints
 
-Research prototype inspired by Graia, **Optimal Deterministic Fully Sparse Matrix Multiplication** (arXiv:2608.18496), and Bennett et al.'s deterministic sparse-recovery construction (arXiv:2508.10250).
+Research prototype inspired by Graia, **Optimal Deterministic Fully Sparse Matrix Multiplication** (arXiv:2608.18496), with practical moment/IBLT-style recovery derived from the nested sparse-recovery architecture.
 
-v0.6 is driven by the v0.5 sparse-output benchmark where `C` had 128 active columns × 7 nonzeros/column, `rho ≈ 60,855`, but the binary-signature backend still lost to one exact multiplication. The run showed two concrete problems:
+v0.7 builds on the first successful v0.6 benchmark where the complete moment+mask+scheduler algorithm beat the adaptive exact baseline. The production-oriented question is now: **can the library decide when to use sketch recovery without knowing the true `nnz(A*B)`, and can it stop safely without an exact `K`?**
 
-1. `q=8` binary signatures used 216 recovery rows and recovered only 19/128 columns.
-2. Those 19 recovered columns did not reduce the next multiplication enough; fallback still processed essentially the whole output domain.
+## What is new
 
-v0.6 attacks both directly.
+### 1. `AutoSpGEMM`
 
-## 1. New `moment` recovery backend
+New library API:
 
-The binary-signature backend spends roughly `ceil(log2(N+1))` rows per bucket. At `N=256`, that is 9 rows/bucket.
-
-`moment` instead stores three exact integer measurements per bucket:
-
-```text
-S0 = Σ x_i
-S1 = Σ (i+1) x_i
-S2 = Σ (i+1)^2 x_i
+```rust
+let (c, stats) = auto_spgemm(&a, &b, AutoSpGemmConfig::default());
 ```
 
-For an isolated bucket:
+It does not receive the true output or true `nnz(C)`. It:
+
+1. computes the candidate-product count `F` in `O(nnz(A))` using B row degrees;
+2. exactly multiplies a small set of evenly spaced A rows;
+3. estimates output nnz, active output columns, average nnz per active column, output density, and `rho = F / estimated_nnz(C)`;
+4. predicts the moment-recovery row count at the likely useful `q`;
+5. chooses **exact** or **moment-sketch** execution;
+6. if sketch execution cannot obtain a residual certificate, optionally falls back to exact multiplication.
+
+The exact branch itself is adaptive: below `exact_dense_cell_limit` (16M total A+B+C dense cells by default) it uses the fast adaptive rectangular kernel; above that budget it stays in CSR and uses the hash SpGEMM path rather than forcing a dangerous dense materialization.
+
+The default selector prefers sketching only when all of these look favorable:
 
 ```text
-code = S1 / S0
-index = code - 1
-S2 == code^2 * S0     # collision check
+estimated rho                 >= 256
+estimated avg nnz/active col  <= 64
+estimated output density      <= 10%
+estimated moment rows / rows  <  80%
 ```
 
-The same idea works for the outer direct-product measurement: `S0`, `S1`, and `S2` are vectors and all vector coordinates must agree on the same recovered index.
+These are engineering defaults, not theorem constants. They are configurable through `AutoSpGemmConfig`.
 
-The decoder repeatedly peels validated singleton buckets and finally re-measures the recovered sparse vector exactly. If its measurement does not reproduce the original sketch, the decoder rejects it.
+### 2. Independent residual fingerprint
 
-For the benchmark `N=256`, `q=8`, degree 3, oversampling 3:
+v0.7 can certify that a reconstructed candidate `D` satisfies `AB-D = 0` without knowing exact `K`.
+
+For each independent lane it chooses random field weights `r_i` and `s_j` modulo the Mersenne prime `2^61-1` and precomputes:
 
 ```text
-binary signature: 24 buckets × 9 rows = 216 rows
-moment backend:    24 buckets × 3 rows = 72 rows
+phi(AB) = r^T A B s = (r^T A)(B s)
 ```
 
-This backend is an **engineering backend over exact `i64` arithmetic**, not Graia/Bennett's arbitrary-ring theorem-level recovery pair.
-
-## 2. Support-masked residual multiplication
-
-When the outer recovery matrix is identity, the algorithm sees concrete residual output-column IDs. With:
+Verification then computes only:
 
 ```text
---masked-residual true
+phi(D) = sum_(i,j in supp(D)) r_i * D_ij * s_j
 ```
 
-v0.6 records that observed support and later zeros every other column of `B` before forming `B*G^T`.
+and checks `phi(D) == phi(AB)`.
 
-So after observing 128 live output columns out of 512, later work becomes conceptually:
+The expensive target fingerprint is still only linear in the input nnz per lane; checking a candidate is linear in `nnz(D)`. Three independently seeded lanes are the default. A zero seed requests a runtime-derived seed; tests use fixed seeds for reproducibility.
+
+This is a **probabilistic residual certificate**, not Graia's deterministic recovery theorem. Exact identity recovery and exact correction remain available when deterministic verification is required.
+
+CLI controls:
 
 ```text
-A * B[:, observed_residual_columns]
+--residual-fingerprint true|false
+--fingerprint-lanes N
+--fingerprint-seed N     # 0 = runtime-derived
 ```
 
-instead of multiplying all 512 output columns again.
+### 3. Prepared rectangular factors
 
-For the practical `moment` backend, columns successfully inner-decoded are removed from the mask. The theorem-oriented library entry points leave this optimization disabled by default; the benchmark CLI enables it by default.
-
-Because an early compressed `H` can theoretically hide a residual column, support masking is a **practical heuristic**, not a proof-level support certificate. The benchmark CLI knows the exact `nnz(C)` and can use `--exact-k-bound true` to trigger a full safety correction if the masked path finishes with fewer than `K` entries.
-
-## 3. Observed-geometry q scheduler
-
-The paper schedule remains available unchanged. The practical CLI additionally enables:
+v0.6 repeatedly converted dense sketch factors into sparse row views inside the rectangular dispatcher. v0.7 introduces `PreparedFactor`:
 
 ```text
---practical-scheduler true
+DenseMatrix
+  + cached sparse rows
+  + row nnz counts
+  + column nnz counts
 ```
 
-After identity outer recovery exposes `m` live residual columns, v0.6 estimates:
+Recovery-factor caches now store prepared factors, so a reused `HA` or `BG^T` also reuses its sparse representation.
+
+`adaptive_matmul_prepared()` therefore chooses among:
 
 ```text
-average remaining column sparsity ≈ K_remaining / m
+dense-blocked
+sparse-left
+sparse-right
+sparse-sparse
 ```
 
-and skips paper rounds whose `q` is below the next power of two of that estimate.
+without charging another full factor scan. The prepared auto policy applies a small 9/8 irregularity penalty to sparse×sparse traversal so a nearly-dense `HA` with a sparse masked `BG^T` tends to select the more cache-friendly sparse-right path.
 
-For the 128 × 7 sparse-output benchmark:
+The old one-shot `adaptive_matmul()` remains unchanged for standalone/exact baseline comparisons and still includes sparse-view construction cost.
+
+### 4. Loose K bound + tight scheduler hint
+
+The nested algorithm still needs a finite `K` bound to construct its paper-style schedule. `AutoSpGEMM` now separates:
 
 ```text
-K = 896
-observed columns = 128
-896 / 128 = 7
-next practical q = 8
+K bound supplied to schedule    = sampled estimate × safety factor
+scheduler K hint                = tighter sampled estimate
 ```
 
-so the no-progress `q=3` round can be skipped.
+So the schedule can be conservative without forcing the practical q scheduler to jump too high.
 
-## 4. v0.5 caches remain
+If the estimate is wrong, the residual fingerprint detects an incomplete result. `AutoSpGEMM` then falls back to exact multiplication when `exact_fallback=true`.
 
-v0.6 keeps the existing hierarchy:
+## Recommended v0.7 benchmark
 
-```text
-recovery matrix
-    ↓
-HA / BG^T
-    ↓
-HABG^T
-    ↓
-W = H(AB-D)G^T for a D version
+First verify the crate:
+
+```bash
+cargo test
 ```
 
-Support-masked products are deliberately round-local because the mask changes as columns are recovered.
-
-## Recommended v0.6 experiment
-
-This is the first run to try:
+Then run the existing sparse-output workload with **no exact-K stop condition** and enable the production selector:
 
 ```bash
 cargo run --release -- \
@@ -128,95 +132,101 @@ cargo run --release -- \
   --guaranteed-correction false \
   --practical-scheduler true \
   --masked-residual true \
-  --exact-k-bound true \
+  --exact-k-bound false \
+  --residual-fingerprint true \
+  --fingerprint-lanes 3 \
+  --auto-select true \
+  --auto-sample-rows 8 \
   --rect-kernel auto \
   --repeats 5
 ```
 
-The useful qualitative target is:
+There are two useful outputs:
+
+1. the explicit nested benchmark, which still receives `K=nnz(C)` as its schedule bound because the CLI is a research harness, but does **not** use it as an exact stop condition when `--exact-k-bound false`;
+2. the `AutoSpGEMM v0.7` section, which receives **no true K at all** and uses only sampled estimates + residual fingerprinting.
+
+A successful auto result should look qualitatively like:
 
 ```text
-round q=1: observe ~128 residual columns
-scheduler: skip q=3, target q=8
-round q=8: H around 72 rows, mask around 128 columns, recover most columns
-next compressed round: mask contains only a handful of unresolved columns
-terminate before a full 512-column exact multiplication
+AutoSpGEMM v0.7 (does not use true K):
+  choice: Sketch
+  exact product check (benchmark oracle): PASS
+  estimate: ... est-col-nnz around single digits ... q=8 ...
+  sketch certificate: fingerprint=true ...
 ```
 
-The decisive comparison is now:
+For the old overlap workload with dense surviving columns, the selector should instead report `choice: Exact` because estimated per-column output sparsity/output density are too high.
+
+## Existing v0.6 practical path
+
+The moment backend remains:
 
 ```text
-Nested total < baseline adaptive exact
+3 rows / bucket:
+S0 = sum x_i
+S1 = sum (i+1)x_i
+S2 = sum (i+1)^2 x_i
 ```
 
-not the much slower hash-map SpGEMM baseline.
+with peeling, exact remeasurement, support masking, and the observed-geometry q scheduler.
+
+Support masking still activates only after identity outer recovery exposes concrete residual output-column IDs. Successfully decoded moment columns are removed from the mask, so later multiplication touches only the unresolved tail.
 
 ## Recovery backends
 
-- `moment` — 3-row/bucket algebraic moment peeling; practical v0.6 default.
-- `signature` — deterministic SplitMix bucket graph + binary index signatures; practical comparison.
-- `guv` — explicit deterministic Parvaresh–Vardy/GUV graph + Bennett decoder.
+- `moment` — 3-row/bucket algebraic moment peeling; practical default.
+- `signature` — deterministic SplitMix bucket graph + binary index signatures.
+- `guv` — explicit Parvaresh–Vardy/GUV graph + Bennett decoder.
 - `identity` — exact uncompressed recovery reference.
 
-Graia permits `I_N` whenever a recovery construction would use at least as many rows as identity. `--identity-fallback true` implements that behavior.
+## Main APIs
 
-## Practical vs theorem-oriented mode
+```rust
+// theorem/control-flow oriented
+nested_spgemm(...)
+nested_spgemm_with_policy(...)
 
-Library calls `nested_spgemm()` and `nested_spgemm_with_policy()` keep the practical scheduler and support mask **off by default**.
+// engineering controls
+nested_spgemm_with_options(...)
 
-The CLI calls `nested_spgemm_with_options()` with:
+// v0.7 production-oriented wrapper
+auto_spgemm(...)
+analyze_workload(...)
 
-```text
-practical_scheduler = true
-masked_residual      = true
-exact_k_bound        = true
-```
-
-unless overridden. This distinction is intentional: the moment backend and observed-support mask are engineering experiments, not additions to Graia's deterministic theorem.
-
-## CLI additions
-
-```text
---nested-backend guv|signature|moment|identity|off
---practical-scheduler BOOL
---masked-residual BOOL
---exact-k-bound BOOL
-```
-
-Existing controls remain:
-
-```text
---recovery-degree N
---recovery-oversampling X
---identity-fallback BOOL
---guaranteed-correction BOOL
---rect-kernel auto|dense|sparse-left|sparse-right|sparse-sparse
-```
-
-## Build
-
-```bash
-cargo test
-cargo run --release -- --help
+// rectangular kernels
+adaptive_matmul(...)
+adaptive_matmul_prepared(...)
 ```
 
 ## Source layout
 
 ```text
 src/
-├── guv.rs        explicit GUV finite-field construction
-├── recovery.rs   signature/GUV/moment recovery, masking, scheduler, caches
-├── rect.rs       adaptive rectangular multiplication
-├── sketch.rs     cheap sketch probe and Graia q/p/t schedule
-├── spgemm.rs     hash baseline and exact dense kernel
-├── matrix.rs     CSR/dense primitives
-├── synthetic.rs  overlap + Walsh-Hadamard sparse-output generators
+├── auto.rs        workload sampling + exact/sketch selection
+├── fingerprint.rs bilinear residual certificate over 2^61-1
+├── guv.rs         explicit GUV finite-field construction
+├── recovery.rs    nested recovery, moment/signature/GUV, masks, scheduler, caches
+├── rect.rs        one-shot + prepared adaptive rectangular multiplication
+├── sketch.rs      cheap probe and Graia q/p/t schedule
+├── spgemm.rs      hash baseline and simple dense kernel
+├── matrix.rs      CSR/dense primitives
+├── synthetic.rs   overlap + Walsh-Hadamard sparse-output generators
 ├── lib.rs
-└── main.rs       benchmark CLI
+└── main.rs        benchmark CLI
 ```
 
-## Current research boundary
+## Research boundary
 
-The `moment` backend relies on integer-weighted measurements and exact division, so it does not preserve the arbitrary-ring guarantee of the paper. Its singleton test is deliberately conservative and its final decoder re-measures every accepted vector, but adversarial signed collisions are still outside the theorem-level guarantee.
+The winning practical path is no longer a literal implementation of the deterministic theorem. It combines:
 
-The purpose of v0.6 is to answer a narrower practical question: **can a compact recoverable sketch plus support-restricted follow-up work beat the already-fast exact rectangular baseline on high-amplification, genuinely sparse-output matrices?**
+```text
+outer support discovery
++ column masking
++ moment-hash inner recovery
++ practical q scheduling
++ randomized residual fingerprinting
++ exact fallback when certification fails
+```
+
+The GUV backend remains available for theorem-oriented experiments. The purpose of the v0.7 path is different: turn the paper's compressed-recovery architecture into a useful adaptive SpGEMM strategy on workloads where candidate-product amplification is extreme but the true output is column-sparse.

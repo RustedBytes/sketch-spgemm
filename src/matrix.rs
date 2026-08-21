@@ -102,6 +102,20 @@ impl DenseMatrix {
     pub fn nnz(&self) -> usize {
         self.data.iter().filter(|&&x| x != 0).count()
     }
+
+    pub fn to_csr(&self) -> CsrMatrix {
+        let mut triplets = Vec::with_capacity(self.nnz());
+        for i in 0..self.rows {
+            let base = i * self.cols;
+            for j in 0..self.cols {
+                let v = self.data[base + j];
+                if v != 0 {
+                    triplets.push((i, j, v));
+                }
+            }
+        }
+        CsrMatrix::from_triplets(self.rows, self.cols, &triplets)
+    }
 }
 
 impl std::ops::Index<(usize, usize)> for DenseMatrix {

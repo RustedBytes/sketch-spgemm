@@ -1,5 +1,6 @@
 use crate::matrix::DenseMatrix;
 use std::fmt;
+use std::sync::Arc;
 
 /// Rectangular multiplication policy for the compressed product (H*A)(B*G^T).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +65,59 @@ impl fmt::Display for RectangularKernel {
             Self::SparseSparse => "sparse-sparse",
         };
         f.write_str(s)
+    }
+}
+
+
+#[derive(Clone, Debug)]
+pub struct PreparedFactor {
+    pub dense: Arc<DenseMatrix>,
+    pub sparse_rows: Arc<Vec<Vec<(usize, i64)>>>,
+    pub nnz: usize,
+    pub row_nnz: Arc<Vec<usize>>,
+    pub col_nnz: Arc<Vec<usize>>,
+}
+
+impl PreparedFactor {
+    pub fn new(matrix: DenseMatrix) -> Self {
+        Self::from_arc(Arc::new(matrix))
+    }
+
+    pub fn from_arc(dense: Arc<DenseMatrix>) -> Self {
+        let mut rows = Vec::with_capacity(dense.rows);
+        let mut row_nnz = vec![0usize; dense.rows];
+        let mut col_nnz = vec![0usize; dense.cols];
+        let mut nnz = 0usize;
+        for i in 0..dense.rows {
+            let mut row = Vec::new();
+            let base = i * dense.cols;
+            for j in 0..dense.cols {
+                let v = dense.data[base + j];
+                if v != 0 {
+                    row.push((j, v));
+                    row_nnz[i] += 1;
+                    col_nnz[j] += 1;
+                    nnz += 1;
+                }
+            }
+            rows.push(row);
+        }
+        Self {
+            dense,
+            sparse_rows: Arc::new(rows),
+            nnz,
+            row_nnz: Arc::new(row_nnz),
+            col_nnz: Arc::new(col_nnz),
+        }
+    }
+
+    #[inline]
+    pub fn rows(&self) -> usize { self.dense.rows }
+    #[inline]
+    pub fn cols(&self) -> usize { self.dense.cols }
+    #[inline]
+    pub fn density(&self) -> f64 {
+        self.nnz as f64 / self.rows().saturating_mul(self.cols()).max(1) as f64
     }
 }
 
@@ -222,6 +276,77 @@ pub fn adaptive_matmul(
         scalar_multiplications,
     };
 
+    (out, stats)
+}
+
+/// Adaptive multiplication when dense factors and their sparse row views are
+/// already prepared/cached. Unlike `adaptive_matmul`, the auto cost model does
+/// not charge another full factor scan for sparse traversal. A small empirical
+/// penalty is applied to sparse×sparse pointer chasing so nearly-dense left
+/// factors tend to use the more cache-friendly sparse-right kernel.
+pub fn adaptive_matmul_prepared(
+    a: &PreparedFactor,
+    b: &PreparedFactor,
+    policy: RectangularPolicy,
+) -> (DenseMatrix, RectangularStats) {
+    assert_eq!(a.cols(), b.rows(), "incompatible matrix dimensions");
+    let m = a.rows() as u128;
+    let n = a.cols() as u128;
+    let g = b.cols() as u128;
+    let dense_ops = m.saturating_mul(n).saturating_mul(g);
+    let sparse_left_ops = (a.nnz as u128).saturating_mul(g);
+    let sparse_right_ops = m.saturating_mul(b.nnz as u128);
+    let sparse_sparse_ops: u128 = a.col_nnz.iter()
+        .zip(b.row_nnz.iter())
+        .map(|(&x, &y)| (x as u128) * (y as u128))
+        .sum();
+
+    let dense_cost = dense_ops;
+    let sparse_left_cost = sparse_left_ops;
+    let sparse_right_cost = sparse_right_ops;
+    // Prepared sparse views remove scan cost, but sparse×sparse has more
+    // irregular indirection. A 9/8 penalty is intentionally conservative and
+    // can still be beaten easily when both factors are truly sparse.
+    let sparse_sparse_cost = sparse_sparse_ops.saturating_mul(9) / 8;
+
+    let kernel = match policy {
+        RectangularPolicy::Dense => RectangularKernel::DenseBlocked,
+        RectangularPolicy::SparseLeft => RectangularKernel::SparseLeft,
+        RectangularPolicy::SparseRight => RectangularKernel::SparseRight,
+        RectangularPolicy::SparseSparse => RectangularKernel::SparseSparse,
+        RectangularPolicy::Auto => [
+            (dense_cost, RectangularKernel::DenseBlocked),
+            (sparse_left_cost, RectangularKernel::SparseLeft),
+            (sparse_right_cost, RectangularKernel::SparseRight),
+            (sparse_sparse_cost, RectangularKernel::SparseSparse),
+        ]
+        .into_iter()
+        .min_by_key(|(cost, _)| *cost)
+        .map(|(_, kernel)| kernel)
+        .unwrap(),
+    };
+
+    let (out, scalar_multiplications) = match kernel {
+        RectangularKernel::DenseBlocked => dense_blocked(&a.dense, &b.dense),
+        RectangularKernel::SparseLeft => sparse_left(&a.dense, &b.dense, &a.sparse_rows),
+        RectangularKernel::SparseRight => sparse_right(&a.dense, &b.dense, &b.sparse_rows),
+        RectangularKernel::SparseSparse => sparse_sparse(&a.dense, &b.dense, &a.sparse_rows, &b.sparse_rows),
+    };
+
+    let stats = RectangularStats {
+        kernel: Some(kernel),
+        a_nnz: a.nnz,
+        b_nnz: b.nnz,
+        a_density: a.density(),
+        b_density: b.density(),
+        dense_ops,
+        dense_estimated_cost: dense_cost,
+        sparse_left_estimated_cost: sparse_left_cost,
+        sparse_right_estimated_cost: sparse_right_cost,
+        sparse_sparse_estimated_cost: sparse_sparse_cost,
+        sparse_candidate_products: sparse_sparse_ops,
+        scalar_multiplications,
+    };
     (out, stats)
 }
 
@@ -456,4 +581,17 @@ mod tests {
         assert_eq!(right.scalar_multiplications, (a.rows * right.b_nnz) as u128);
         assert_eq!(ss.scalar_multiplications, ss.sparse_candidate_products);
     }
+
+    #[test]
+    fn prepared_factors_avoid_scan_cost_and_keep_exactness() {
+        let (a, b) = sample();
+        let pa = PreparedFactor::new(a.clone());
+        let pb = PreparedFactor::new(b.clone());
+        let (prepared, stats) = adaptive_matmul_prepared(&pa, &pb, RectangularPolicy::Auto);
+        let (reference, _) = adaptive_matmul(&a, &b, RectangularPolicy::Dense);
+        assert_eq!(prepared, reference);
+        assert_eq!(stats.a_nnz, a.nnz());
+        assert_eq!(stats.b_nnz, b.nnz());
+    }
+
 }
