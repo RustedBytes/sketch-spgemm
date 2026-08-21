@@ -11,7 +11,7 @@ pub mod synthetic;
 pub use auto::{analyze_workload, auto_spgemm, candidate_product_count, AutoChoice, AutoSpGemmConfig, AutoSpGemmStats, AutoTimingStats, ExactMethod, WorkloadEstimate};
 pub use fingerprint::{FingerprintConfig, FingerprintStats, ResidualFingerprint};
 pub use guv::{GuvConfig, GuvError, GuvParameters, GuvRecovery};
-pub use matrix::{CsrMatrix, DenseMatrix};
+pub use matrix::{CsrMatrix, DenseMatrix, Matrix, MatrixLike, Scalar};
 pub use recovery::{
     left_recovery_sketch, nested_spgemm, nested_spgemm_with_options, nested_spgemm_with_policy,
     right_recovery_sketch, right_recovery_sketch_masked, safe_decode_product, safe_decode_scalar,

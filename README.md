@@ -15,8 +15,10 @@ while its practical path uses an IBLT-style moment recovery strategy rather
 than being a literal implementation of the deterministic theorem.
 
 > [!IMPORTANT]
-> This is an exact-`i64` research implementation, not a general tensor library,
-> GPU kernel, or LLM inference engine. See [Limitations](#limitations).
+> The matrix containers are generic, but the current multiplication, recovery,
+> and fingerprint algorithms use exact `i64` arithmetic. This is not a general
+> tensor library, GPU kernel, or LLM inference engine. See
+> [Limitations](#limitations).
 
 ## Why SketchSpGEMM?
 
@@ -122,6 +124,40 @@ let (c, stats) = auto_spgemm(&a, &b, AutoSpGemmConfig::default());
 ```
 
 It does not receive the true product or `nnz(C)`.
+
+## Matrix types
+
+The storage containers share a common scalar default and metadata interface:
+
+```rust
+use sketch_spgemm::{CsrMatrix, DenseMatrix, Matrix, MatrixLike, Scalar};
+
+fn metadata<M: MatrixLike>(matrix: &M) -> ((usize, usize), usize) {
+    (matrix.shape(), matrix.nnz())
+}
+
+let mut dense = DenseMatrix::<i32>::zeros(2, 2);
+dense[(0, 1)] = 7;
+
+let csr: CsrMatrix<i32> = dense.to_csr();
+let matrix: Matrix<i32> = csr.into();
+
+assert_eq!(metadata(&matrix), ((2, 2), 1));
+
+let exact_value: Scalar = 7i64;
+assert_eq!(exact_value, 7);
+```
+
+- `CsrMatrix<T = Scalar>` stores compressed sparse rows.
+- `DenseMatrix<T = Scalar>` stores contiguous row-major values.
+- `Matrix<T = Scalar>` is an owning enum for interfaces that accept either
+  representation.
+- `MatrixLike` exposes shared `rows`, `cols`, `shape`, and `nnz`
+  metadata.
+- `Scalar` is the `i64` type used by the current algorithms.
+
+Kernels continue to accept concrete dense or CSR types so representation
+dispatch happens outside performance-sensitive inner loops.
 
 ## How automatic execution works
 
@@ -266,8 +302,12 @@ adaptive_matmul_prepared(...)      cached-factor rectangular multiplication
 spgemm_hash(...)                   exact CSR baseline
 ```
 
-## What's new in v0.7.1
+## What's new in v0.8.0
 
+- Generic `CsrMatrix<T>` and `DenseMatrix<T>` containers with backward-
+  compatible `i64` defaults.
+- Shared `MatrixLike` metadata and a `Matrix<T>` boundary enum.
+- Explicit `Scalar` alias for the exact arithmetic used by recovery.
 - Lower-overhead structural analysis and staged row sampling.
 - Dense scratch accumulation with touched-column tracking for sampled rows.
 - Fused residual-fingerprint lanes over one sparse traversal of each input.
@@ -277,7 +317,8 @@ spgemm_hash(...)                   exact CSR baseline
 
 ## Limitations
 
-- Matrices store exact signed 64-bit integers only.
+- The matrix containers are generic, but multiplication, recovery, and
+  fingerprint APIs currently operate on exact signed 64-bit integers.
 - Arithmetic overflow is not converted into a recoverable error.
 - Execution is CPU-only and currently single-process.
 - There are no CUDA, Metal, distributed, or production storage integrations.
