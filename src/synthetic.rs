@@ -88,8 +88,7 @@ pub fn overlap_problem(
 /// scalar products cancel even though C is sparse.
 ///
 /// The construction uses the orthogonality identity
-///
-///     H_r dot H_s = amplification_width * [r == s].
+/// `H_r dot H_s = amplification_width * [r == s]`.
 ///
 /// For each active output column, B is the sum of the Hadamard codewords of the
 /// selected output rows. Multiplication by A therefore leaves nonzeros only in
