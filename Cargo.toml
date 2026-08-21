@@ -2,8 +2,24 @@
 name = "sketch-spgemm"
 version = "0.8.0"
 edition = "2021"
+rust-version = "1.70"
 description = "Adaptive SketchSpGEMM with low-overhead auto selection and fused residual fingerprints"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/RustedBytes/sketch-spgemm"
+documentation = "https://docs.rs/sketch-spgemm"
+readme = "README.md"
+keywords = ["spgemm", "sparse-matrix", "linear-algebra", "sketching", "algorithms"]
+categories = ["algorithms", "data-structures", "mathematics", "science"]
+include = [
+    "src/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [profile.release]
 lto = "thin"

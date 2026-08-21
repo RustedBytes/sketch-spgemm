@@ -1,5 +1,9 @@
 # SketchSpGEMM
 
+[![Crates.io](https://img.shields.io/crates/v/sketch-spgemm.svg)](https://crates.io/crates/sketch-spgemm)
+[![Documentation](https://docs.rs/sketch-spgemm/badge.svg)](https://docs.rs/sketch-spgemm)
+[![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/sketch-spgemm.svg)](#license)
+
 Adaptive, sketch-based sparse matrix multiplication in Rust.
 
 SketchSpGEMM is a research prototype for computing `C = A × B` when `A` and
@@ -94,6 +98,12 @@ cargo run --release
 ```
 
 ### Library example
+
+Add the library to a Cargo project:
+
+```bash
+cargo add sketch-spgemm
+```
 
 ```rust
 use sketch_spgemm::{auto_spgemm, AutoSpGemmConfig, CsrMatrix};
@@ -356,4 +366,7 @@ kernels, additional datasets, property testing, and reproducible benchmarks.
 
 ## License
 
-The crate manifest declares `MIT OR Apache-2.0`.
+Licensed under either of the following, at your option:
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE-MIT)

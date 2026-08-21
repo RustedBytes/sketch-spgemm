@@ -68,7 +68,6 @@ impl fmt::Display for RectangularKernel {
     }
 }
 
-
 #[derive(Clone, Debug)]
 pub struct PreparedFactor {
     pub dense: Arc<DenseMatrix>,
@@ -112,9 +111,13 @@ impl PreparedFactor {
     }
 
     #[inline]
-    pub fn rows(&self) -> usize { self.dense.rows }
+    pub fn rows(&self) -> usize {
+        self.dense.rows
+    }
     #[inline]
-    pub fn cols(&self) -> usize { self.dense.cols }
+    pub fn cols(&self) -> usize {
+        self.dense.cols
+    }
     #[inline]
     pub fn density(&self) -> f64 {
         self.nnz as f64 / self.rows().saturating_mul(self.cols()).max(1) as f64
@@ -136,7 +139,7 @@ pub struct RectangularStats {
     pub sparse_left_estimated_cost: u128,
     pub sparse_right_estimated_cost: u128,
     pub sparse_sparse_estimated_cost: u128,
-    /// Sum_k nnz(A[:,k]) * nnz(B[k,:]).
+    /// `sum_k nnz(A[:, k]) * nnz(B[k, :])`.
     pub sparse_candidate_products: u128,
     /// Scalar multiplies actually issued by the selected kernel.
     pub scalar_multiplications: u128,
@@ -296,7 +299,9 @@ pub fn adaptive_matmul_prepared(
     let dense_ops = m.saturating_mul(n).saturating_mul(g);
     let sparse_left_ops = (a.nnz as u128).saturating_mul(g);
     let sparse_right_ops = m.saturating_mul(b.nnz as u128);
-    let sparse_sparse_ops: u128 = a.col_nnz.iter()
+    let sparse_sparse_ops: u128 = a
+        .col_nnz
+        .iter()
         .zip(b.row_nnz.iter())
         .map(|(&x, &y)| (x as u128) * (y as u128))
         .sum();
@@ -330,7 +335,9 @@ pub fn adaptive_matmul_prepared(
         RectangularKernel::DenseBlocked => dense_blocked(&a.dense, &b.dense),
         RectangularKernel::SparseLeft => sparse_left(&a.dense, &b.dense, &a.sparse_rows),
         RectangularKernel::SparseRight => sparse_right(&a.dense, &b.dense, &b.sparse_rows),
-        RectangularKernel::SparseSparse => sparse_sparse(&a.dense, &b.dense, &a.sparse_rows, &b.sparse_rows),
+        RectangularKernel::SparseSparse => {
+            sparse_sparse(&a.dense, &b.dense, &a.sparse_rows, &b.sparse_rows)
+        }
     };
 
     let stats = RectangularStats {
@@ -593,5 +600,4 @@ mod tests {
         assert_eq!(stats.a_nnz, a.nnz());
         assert_eq!(stats.b_nnz, b.nnz());
     }
-
 }

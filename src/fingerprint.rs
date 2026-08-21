@@ -48,16 +48,19 @@ impl ResidualFingerprint {
     pub fn new(a: &CsrMatrix, b: &CsrMatrix, config: FingerprintConfig) -> Self {
         assert_eq!(a.cols, b.rows);
         let lanes = config.lanes.max(1);
-        let seed = if config.seed == 0 { runtime_seed() } else { config.seed };
+        let seed = if config.seed == 0 {
+            runtime_seed()
+        } else {
+            config.seed
+        };
 
         let mut row_weights = vec![vec![0u64; a.rows]; lanes];
         let mut col_weights = vec![vec![0u64; b.cols]; lanes];
         for lane in 0..lanes {
             let lane_seed = splitmix64(seed ^ (lane as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
             for i in 0..a.rows {
-                row_weights[lane][i] = nonzero_weight(
-                    lane_seed ^ (i as u64).wrapping_mul(0xD1B5_4A32_D192_ED03),
-                );
+                row_weights[lane][i] =
+                    nonzero_weight(lane_seed ^ (i as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
             }
             for j in 0..b.cols {
                 col_weights[lane][j] = nonzero_weight(
@@ -74,10 +77,7 @@ impl ResidualFingerprint {
             for (k, av) in a.row(i) {
                 let avm = signed_mod(av);
                 for lane in 0..lanes {
-                    left[lane][k] = add_mod(
-                        left[lane][k],
-                        mul_mod(row_weights[lane][i], avm),
-                    );
+                    left[lane][k] = add_mod(left[lane][k], mul_mod(row_weights[lane][i], avm));
                 }
             }
         }
@@ -88,10 +88,7 @@ impl ResidualFingerprint {
             for (j, bv) in b.row(k) {
                 let bvm = signed_mod(bv);
                 for lane in 0..lanes {
-                    right[lane][k] = add_mod(
-                        right[lane][k],
-                        mul_mod(bvm, col_weights[lane][j]),
-                    );
+                    right[lane][k] = add_mod(right[lane][k], mul_mod(bvm, col_weights[lane][j]));
                 }
             }
         }
@@ -105,10 +102,17 @@ impl ResidualFingerprint {
             target[lane] = fp;
         }
 
-        Self { row_weights, col_weights, target, seed }
+        Self {
+            row_weights,
+            col_weights,
+            target,
+            seed,
+        }
     }
 
-    pub fn lanes(&self) -> usize { self.target.len() }
+    pub fn lanes(&self) -> usize {
+        self.target.len()
+    }
 
     pub fn fingerprint(&self, d: &CsrMatrix) -> Vec<u64> {
         assert_eq!(d.rows, self.row_weights[0].len());
@@ -135,14 +139,20 @@ impl ResidualFingerprint {
         self.fingerprint(d) == self.target
     }
 
-    pub fn target(&self) -> &[u64] { &self.target }
+    pub fn target(&self) -> &[u64] {
+        &self.target
+    }
 }
 
 #[inline]
 fn add_mod(a: u64, b: u64) -> u64 {
     // a,b < p and 2p < 2^62, so u64 addition cannot overflow.
     let x = a + b;
-    if x >= MODULUS { x - MODULUS } else { x }
+    if x >= MODULUS {
+        x - MODULUS
+    } else {
+        x
+    }
 }
 
 #[inline]
@@ -153,8 +163,12 @@ fn reduce_mersenne(mut x: u128) -> u64 {
     x = (x & MODULUS_U128) + (x >> 61);
     x = (x & MODULUS_U128) + (x >> 61);
     let mut r = x as u64;
-    if r >= MODULUS { r -= MODULUS; }
-    if r >= MODULUS { r -= MODULUS; }
+    if r >= MODULUS {
+        r -= MODULUS;
+    }
+    if r >= MODULUS {
+        r -= MODULUS;
+    }
     r
 }
 
@@ -170,7 +184,11 @@ fn signed_mod(v: i64) -> u64 {
     } else {
         let mag = (-(v as i128)) as u128;
         let r = reduce_mersenne(mag);
-        if r == 0 { 0 } else { MODULUS - r }
+        if r == 0 {
+            0
+        } else {
+            MODULUS - r
+        }
     }
 }
 
@@ -204,14 +222,18 @@ mod tests {
 
     #[test]
     fn fingerprint_accepts_exact_product_and_rejects_perturbation() {
-        let a = CsrMatrix::from_triplets(3, 3, &[(0,0,2),(0,2,1),(1,1,-3),(2,0,5)]);
-        let b = CsrMatrix::from_triplets(3, 3, &[(0,0,7),(1,2,11),(2,1,13)]);
+        let a = CsrMatrix::from_triplets(3, 3, &[(0, 0, 2), (0, 2, 1), (1, 1, -3), (2, 0, 5)]);
+        let b = CsrMatrix::from_triplets(3, 3, &[(0, 0, 7), (1, 2, 11), (2, 1, 13)]);
         let (c, _) = spgemm_hash(&a, &b);
         let fp = ResidualFingerprint::new(&a, &b, FingerprintConfig { lanes: 3, seed: 42 });
         assert!(fp.verifies(&c));
         let mut t = Vec::new();
-        for i in 0..c.rows { for (j,v) in c.row(i) { t.push((i,j,v)); } }
-        t.push((2,2,1));
+        for i in 0..c.rows {
+            for (j, v) in c.row(i) {
+                t.push((i, j, v));
+            }
+        }
+        t.push((2, 2, 1));
         let bad = CsrMatrix::from_triplets(c.rows, c.cols, &t);
         assert!(!fp.verifies(&bad));
     }
@@ -239,7 +261,11 @@ mod tests {
                 (v as u128 % MODULUS_U128) as u64
             } else {
                 let m = (-(v as i128)) as u128 % MODULUS_U128;
-                if m == 0 { 0 } else { MODULUS - m as u64 }
+                if m == 0 {
+                    0
+                } else {
+                    MODULUS - m as u64
+                }
             };
             assert_eq!(signed_mod(v), reference, "v={v}");
         }

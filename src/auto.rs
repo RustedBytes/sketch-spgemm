@@ -144,7 +144,10 @@ pub fn auto_spgemm(
     if !estimate.choose_sketch || estimate.estimated_output_nnz == 0 {
         let start = Instant::now();
         let (result, exact_stats, exact_method) = exact_dispatch(
-            a, b, config.rectangular_policy, config.exact_dense_cell_limit,
+            a,
+            b,
+            config.rectangular_policy,
+            config.exact_dense_cell_limit,
         );
         timing.exact = start.elapsed();
         timing.total = total_start.elapsed();
@@ -164,8 +167,8 @@ pub fn auto_spgemm(
     }
 
     let max_k = a.rows.saturating_mul(b.cols).max(1);
-    let k_bound = ((estimate.estimated_output_nnz as f64) * config.k_safety_factor.max(1.0))
-        .ceil() as usize;
+    let k_bound =
+        ((estimate.estimated_output_nnz as f64) * config.k_safety_factor.max(1.0)).ceil() as usize;
     let k_bound = k_bound.clamp(1, max_k);
 
     let mut moment = config.moment.clone();
@@ -211,7 +214,10 @@ pub fn auto_spgemm(
         let reason = Some("sketch execution ended without a residual certificate".to_string());
         let start = Instant::now();
         let (result, exact_stats, exact_method) = exact_dispatch(
-            a, b, config.rectangular_policy, config.exact_dense_cell_limit,
+            a,
+            b,
+            config.rectangular_policy,
+            config.exact_dense_cell_limit,
         );
         timing.exact = start.elapsed();
         timing.total = total_start.elapsed();
@@ -240,13 +246,19 @@ pub fn auto_spgemm(
             nested: Some(nested_stats),
             exact_stats: None,
             exact_method: None,
-            fallback_reason: Some("returned uncertified sketch result because exact_fallback=false".to_string()),
+            fallback_reason: Some(
+                "returned uncertified sketch result because exact_fallback=false".to_string(),
+            ),
             timing,
         },
     )
 }
 
-pub fn analyze_workload(a: &CsrMatrix, b: &CsrMatrix, config: &AutoSpGemmConfig) -> WorkloadEstimate {
+pub fn analyze_workload(
+    a: &CsrMatrix,
+    b: &CsrMatrix,
+    config: &AutoSpGemmConfig,
+) -> WorkloadEstimate {
     analyze_workload_timed(a, b, config).0
 }
 
@@ -269,7 +281,11 @@ fn analyze_workload_timed(
     if a.rows == 0 || b.cols == 0 {
         timing.total = total_start.elapsed();
         return (
-            empty_estimate(candidate_products, structural_amplification, "empty output domain"),
+            empty_estimate(
+                candidate_products,
+                structural_amplification,
+                "empty output domain",
+            ),
             timing,
         );
     }
@@ -371,7 +387,11 @@ fn analyze_workload_timed(
     (estimate, timing)
 }
 
-fn empty_estimate(candidate_products: u128, structural_amplification: f64, reason: &str) -> WorkloadEstimate {
+fn empty_estimate(
+    candidate_products: u128,
+    structural_amplification: f64,
+    reason: &str,
+) -> WorkloadEstimate {
     WorkloadEstimate {
         candidate_products,
         structural_amplification,
@@ -410,7 +430,11 @@ fn estimate_from_sample(
     }
     .min(a.rows.saturating_mul(b.cols));
 
-    let sample_fraction = if a.rows == 0 { 1.0 } else { sampled_rows as f64 / a.rows as f64 };
+    let sample_fraction = if a.rows == 0 {
+        1.0
+    } else {
+        sampled_rows as f64 / a.rows as f64
+    };
     let estimated_active_columns = estimate_active_columns(
         unique_columns,
         estimated_output_nnz,
@@ -509,9 +533,11 @@ fn classification_is_confident(e: &WorkloadEstimate, config: &AutoSpGemmConfig) 
     // Active-column inference is underdetermined while every sampled nonzero is
     // in a previously unseen column. Require some repeated column observations
     // before early-accepting Sketch; otherwise continue toward sample_rows.
-    let repeats = e.sampled_output_nnz.saturating_sub(e.sampled_unique_columns);
-    let support_model_ready = repeats >= 2
-        && repeats.saturating_mul(10) >= e.sampled_unique_columns.max(1);
+    let repeats = e
+        .sampled_output_nnz
+        .saturating_sub(e.sampled_unique_columns);
+    let support_model_ready =
+        repeats >= 2 && repeats.saturating_mul(10) >= e.sampled_unique_columns.max(1);
 
     if e.choose_sketch {
         support_model_ready
@@ -547,7 +573,9 @@ fn exact_dispatch(
     policy: RectangularPolicy,
     dense_cell_limit: usize,
 ) -> (CsrMatrix, Option<RectangularStats>, ExactMethod) {
-    let dense_cells = a.rows.saturating_mul(a.cols)
+    let dense_cells = a
+        .rows
+        .saturating_mul(a.cols)
         .saturating_add(b.rows.saturating_mul(b.cols))
         .saturating_add(a.rows.saturating_mul(b.cols));
     if dense_cells <= dense_cell_limit {
@@ -562,20 +590,31 @@ fn exact_dispatch(
 }
 
 fn evenly_spaced_rows(rows: usize, count: usize) -> Vec<usize> {
-    if rows == 0 || count == 0 { return Vec::new(); }
-    if count >= rows { return (0..rows).collect(); }
-    if count == 1 { return vec![rows / 2]; }
-    (0..count)
-        .map(|s| s * (rows - 1) / (count - 1))
-        .collect()
+    if rows == 0 || count == 0 {
+        return Vec::new();
+    }
+    if count >= rows {
+        return (0..rows).collect();
+    }
+    if count == 1 {
+        return vec![rows / 2];
+    }
+    (0..count).map(|s| s * (rows - 1) / (count - 1)).collect()
 }
 
 /// Infer total active columns from the number observed in a row sample. Under a
 /// roughly uniform per-column sparsity model, a column with K/C entries is seen
 /// with probability 1-(1-f)^(K/C). We choose the C whose expected observation
 /// count is closest to the measured union size.
-fn estimate_active_columns(observed: usize, k_est: usize, sample_fraction: f64, cols: usize) -> usize {
-    if observed == 0 || k_est == 0 || cols == 0 { return 0; }
+fn estimate_active_columns(
+    observed: usize,
+    k_est: usize,
+    sample_fraction: f64,
+    cols: usize,
+) -> usize {
+    if observed == 0 || k_est == 0 || cols == 0 {
+        return 0;
+    }
     let lo = observed.min(cols).max(1);
     let mut best = lo;
     let mut best_err = f64::INFINITY;
@@ -653,12 +692,18 @@ mod tests {
             min_estimated_rho: 16.0,
             max_estimated_avg_column_nnz: 16.0,
             max_estimated_output_density: 0.25,
-            fingerprint: FingerprintConfig { lanes: 3, seed: 123 },
+            fingerprint: FingerprintConfig {
+                lanes: 3,
+                seed: 123,
+            },
             ..AutoSpGemmConfig::default()
         };
         let (actual, stats) = auto_spgemm(&p.a, &p.b, cfg);
         assert_eq!(actual, expected);
-        assert!(matches!(stats.choice, AutoChoice::Sketch | AutoChoice::ExactFallback));
+        assert!(matches!(
+            stats.choice,
+            AutoChoice::Sketch | AutoChoice::ExactFallback
+        ));
         assert!(stats.timing.total >= stats.timing.analysis_total);
     }
 }

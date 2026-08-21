@@ -1,8 +1,8 @@
 use sketch_spgemm::{
     adaptive_matmul, auto_spgemm, direct_two_sided_sketch, left_sketch, nested_spgemm_with_options,
-    overlap_problem, paper_schedule, right_sketch, sparse_output_problem, spgemm_hash, AutoSpGemmConfig,
-    FingerprintConfig, GuvConfig, CsrMatrix, MomentConfig, NestedOptions, RecoveryBackend,
-    RectangularPolicy, SignatureConfig, SketchMap,
+    overlap_problem, paper_schedule, right_sketch, sparse_output_problem, spgemm_hash,
+    AutoSpGemmConfig, CsrMatrix, FingerprintConfig, GuvConfig, MomentConfig, NestedOptions,
+    RecoveryBackend, RectangularPolicy, SignatureConfig, SketchMap,
 };
 use std::env;
 use std::time::{Duration, Instant};
@@ -78,7 +78,10 @@ impl Default for Config {
 
 fn main() {
     let cfg = parse_args();
-    println!("SketchSpGEMM adaptive sparse multiplication prototype v0.8.0");
+    println!(
+        "SketchSpGEMM adaptive sparse multiplication prototype v{}",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("config: {cfg:?}\n");
 
     let problem = match cfg.synthetic.as_str() {
@@ -112,14 +115,20 @@ fn main() {
     );
     println!("synthetic generator: {}", problem.generator);
     println!("synthetic canceled columns: {}", problem.canceled_columns);
-    println!("synthetic active output columns: {}", problem.active_output_columns);
+    println!(
+        "synthetic active output columns: {}",
+        problem.active_output_columns
+    );
     if let Some(nnz) = problem.target_nnz_per_active_column {
         println!("target nnz / active output column: {nnz}");
     }
     println!("amplification width: {}", problem.amplification_width);
 
     let ((c, stats), baseline_t) = timed_best(cfg.repeats, || spgemm_hash(&problem.a, &problem.b));
-    assert_eq!(stats.candidate_products, problem.expected_candidate_products);
+    assert_eq!(
+        stats.candidate_products,
+        problem.expected_candidate_products
+    );
 
     let rho = if c.nnz() == 0 {
         f64::INFINITY
@@ -148,7 +157,11 @@ fn main() {
         let bd = problem.b.to_dense();
         adaptive_matmul(&ad, &bd, cfg.rectangular_policy)
     });
-    assert_eq!(exact_dense, c.to_dense(), "adaptive exact baseline disagrees with hash SpGEMM");
+    assert_eq!(
+        exact_dense,
+        c.to_dense(),
+        "adaptive exact baseline disagrees with hash SpGEMM"
+    );
     println!(
         "baseline adaptive exact: {} [{}; mults={}]",
         fmt_duration(adaptive_exact_t),
@@ -197,12 +210,18 @@ fn main() {
         probe_rect_stats.b_density,
         probe_rect_stats.scalar_multiplications,
     );
-    println!("  direct H*C*G^T:  {} (oracle only)", fmt_duration(direct_t));
+    println!(
+        "  direct H*C*G^T:  {} (oracle only)",
+        fmt_duration(direct_t)
+    );
     println!("  identity check:  PASS");
 
     let compressed_kernel_t = left_t + right_t + gemm_t;
     println!("\nGo/no-go kernel comparison (recovery excluded):");
-    println!("  compressed kernels total: {}", fmt_duration(compressed_kernel_t));
+    println!(
+        "  compressed kernels total: {}",
+        fmt_duration(compressed_kernel_t)
+    );
     println!(
         "  compressed/hash-baseline: {:.3}x",
         compressed_kernel_t.as_secs_f64() / baseline_t.as_secs_f64().max(1e-12)
@@ -271,10 +290,15 @@ fn main() {
 
         println!("\nNested residual recovery ({})", cfg.nested_backend);
         println!("  total: {}", fmt_duration(nested_t));
-        println!("  exact product check: {}", if exact { "PASS" } else { "FAIL" });
+        println!(
+            "  exact product check: {}",
+            if exact { "PASS" } else { "FAIL" }
+        );
         println!("  output nnz: {}", recovered.nnz());
         println!("  rounds:");
-        println!("    i  q     p     H(rows/kind)          G(rows/kind)          outer inner D_nnz");
+        println!(
+            "    i  q     p     H(rows/kind)          G(rows/kind)          outer inner D_nnz"
+        );
         for s in &nested_stats.rounds {
             println!(
                 "    {:<2} {:<5} {:<5} {:<5}/{:<14} {:<5}/{:<14} {:<5} {:<5} {}",
@@ -317,7 +341,10 @@ fn main() {
             );
         }
         if nested_stats.scheduler_skipped_rounds > 0 {
-            println!("  practical scheduler skipped {} paper round(s)", nested_stats.scheduler_skipped_rounds);
+            println!(
+                "  practical scheduler skipped {} paper round(s)",
+                nested_stats.scheduler_skipped_rounds
+            );
         }
         if nested_stats.terminated_early {
             println!(
@@ -359,7 +386,10 @@ fn main() {
                 identity_fallback: cfg.identity_fallback,
                 guaranteed_correction: false,
             },
-            fingerprint: FingerprintConfig { lanes: cfg.fingerprint_lanes, seed: cfg.fingerprint_seed },
+            fingerprint: FingerprintConfig {
+                lanes: cfg.fingerprint_lanes,
+                seed: cfg.fingerprint_seed,
+            },
             ..AutoSpGemmConfig::default()
         };
         let start = Instant::now();
@@ -368,8 +398,14 @@ fn main() {
         println!("\nAutoSpGEMM v0.8.0 (does not use true K):");
         println!("  total: {}", fmt_duration(auto_time));
         println!("  choice: {:?}", auto_stats.choice);
-        println!("  exact product check (benchmark oracle): {}", if auto_result == c { "PASS" } else { "FAIL" });
-        println!("  K estimate/bound: {} / {}", auto_stats.estimate.estimated_output_nnz, auto_stats.k_bound_used);
+        println!(
+            "  exact product check (benchmark oracle): {}",
+            if auto_result == c { "PASS" } else { "FAIL" }
+        );
+        println!(
+            "  K estimate/bound: {} / {}",
+            auto_stats.estimate.estimated_output_nnz, auto_stats.k_bound_used
+        );
         println!(
             "  estimate: sample-rows={}, sample-nnz={}, observed-cols={}, est-active-cols={}, est-col-nnz={:.2}, est-rho={:.1}, est-density={:.4}, q={}, moment-rows={}",
             auto_stats.estimate.sampled_rows, auto_stats.estimate.sampled_output_nnz,
@@ -395,17 +431,28 @@ fn main() {
             auto_stats.estimate.structural_prefilter_only,
         );
         if let Some(nested) = &auto_stats.nested {
-            println!("  sketch certificate: fingerprint={}, deterministic={}, rounds={}, skipped={}",
-                nested.fingerprint_verified, nested.deterministic_verified, nested.rounds.len(), nested.scheduler_skipped_rounds);
+            println!(
+                "  sketch certificate: fingerprint={}, deterministic={}, rounds={}, skipped={}",
+                nested.fingerprint_verified,
+                nested.deterministic_verified,
+                nested.rounds.len(),
+                nested.scheduler_skipped_rounds
+            );
         }
-        if let Some(method) = auto_stats.exact_method { println!("  exact method: {:?}", method); }
-        if let Some(reason) = &auto_stats.fallback_reason { println!("  fallback: {reason}"); }
+        if let Some(method) = auto_stats.exact_method {
+            println!("  exact method: {:?}", method);
+        }
+        if let Some(reason) = &auto_stats.fallback_reason {
+            println!("  fallback: {reason}");
+        }
     }
 
     println!("\nScope note:");
     println!("  guv backend = explicit Parvaresh-Vardy/GUV neighbor construction +");
     println!("                Bennett A⊗_rB Reduce/Recovery decoder.");
-    println!("  signature backend = binary-index deterministic hash graph for practical comparison.");
+    println!(
+        "  signature backend = binary-index deterministic hash graph for practical comparison."
+    );
     println!("  moment backend = 3-row/bucket algebraic moment peeling over exact i64 arithmetic.");
     println!("  identity backend = exact Algorithm-1 recovery logic, no compression.");
     println!("  With --identity-fallback true, literal GUV constants often select I_N;");
@@ -415,7 +462,6 @@ fn main() {
     println!("  support masking, practical q scheduling, and v0.5 cache hierarchy remain enabled.");
     println!("  --rect-kernel auto dispatches dense/sparse rectangular multiplication per round.");
 }
-
 
 #[derive(Clone, Copy, Debug, Default)]
 struct OutputGeometry {
@@ -474,7 +520,6 @@ fn fmt_duration(d: Duration) -> String {
     }
 }
 
-
 fn largest_power_of_two_leq(x: usize) -> usize {
     assert!(x > 0, "inner dimension must be positive");
     1usize << (usize::BITS as usize - 1 - x.leading_zeros() as usize)
@@ -488,7 +533,9 @@ fn parse_args() -> Config {
             print_help();
             std::process::exit(0);
         }
-        let value = args.next().unwrap_or_else(|| panic!("missing value for {flag}"));
+        let value = args
+            .next()
+            .unwrap_or_else(|| panic!("missing value for {flag}"));
         match flag.as_str() {
             "--rows" => cfg.rows = value.parse().unwrap(),
             "--inner" => cfg.inner = value.parse().unwrap(),
