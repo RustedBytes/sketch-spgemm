@@ -1,4 +1,4 @@
-use crate::matrix::CsrMatrix;
+use crate::matrix::CsrInput;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 2^61-1, a Mersenne prime. A product of two residues is < 2^122, so two
@@ -45,8 +45,12 @@ pub struct ResidualFingerprint {
 }
 
 impl ResidualFingerprint {
-    pub fn new(a: &CsrMatrix, b: &CsrMatrix, config: FingerprintConfig) -> Self {
-        assert_eq!(a.cols, b.rows);
+    pub fn new<A, B>(a: &A, b: &B, config: FingerprintConfig) -> Self
+    where
+        A: CsrInput + ?Sized,
+        B: CsrInput + ?Sized,
+    {
+        assert_eq!(a.cols(), b.rows());
         let lanes = config.lanes.max(1);
         let seed = if config.seed == 0 {
             runtime_seed()
@@ -54,15 +58,15 @@ impl ResidualFingerprint {
             config.seed
         };
 
-        let mut row_weights = vec![vec![0u64; a.rows]; lanes];
-        let mut col_weights = vec![vec![0u64; b.cols]; lanes];
+        let mut row_weights = vec![vec![0u64; a.rows()]; lanes];
+        let mut col_weights = vec![vec![0u64; b.cols()]; lanes];
         for lane in 0..lanes {
             let lane_seed = splitmix64(seed ^ (lane as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-            for i in 0..a.rows {
+            for i in 0..a.rows() {
                 row_weights[lane][i] =
                     nonzero_weight(lane_seed ^ (i as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
             }
-            for j in 0..b.cols {
+            for j in 0..b.cols() {
                 col_weights[lane][j] = nonzero_weight(
                     lane_seed
                         ^ 0xA076_1D64_78BD_642F
@@ -72,8 +76,8 @@ impl ResidualFingerprint {
         }
 
         // left[lane][k] = sum_i r_i A_ik. Scan A once for all lanes.
-        let mut left = vec![vec![0u64; a.cols]; lanes];
-        for i in 0..a.rows {
+        let mut left = vec![vec![0u64; a.cols()]; lanes];
+        for i in 0..a.rows() {
             for (k, av) in a.row(i) {
                 let avm = signed_mod(av);
                 for lane in 0..lanes {
@@ -83,8 +87,8 @@ impl ResidualFingerprint {
         }
 
         // right[lane][k] = sum_j B_kj s_j. Scan B once for all lanes.
-        let mut right = vec![vec![0u64; b.rows]; lanes];
-        for k in 0..b.rows {
+        let mut right = vec![vec![0u64; b.rows()]; lanes];
+        for k in 0..b.rows() {
             for (j, bv) in b.row(k) {
                 let bvm = signed_mod(bv);
                 for lane in 0..lanes {
@@ -96,7 +100,7 @@ impl ResidualFingerprint {
         let mut target = vec![0u64; lanes];
         for lane in 0..lanes {
             let mut fp = 0u64;
-            for k in 0..a.cols {
+            for k in 0..a.cols() {
                 fp = add_mod(fp, mul_mod(left[lane][k], right[lane][k]));
             }
             target[lane] = fp;
@@ -114,12 +118,15 @@ impl ResidualFingerprint {
         self.target.len()
     }
 
-    pub fn fingerprint(&self, d: &CsrMatrix) -> Vec<u64> {
-        assert_eq!(d.rows, self.row_weights[0].len());
-        assert_eq!(d.cols, self.col_weights[0].len());
+    pub fn fingerprint<D>(&self, d: &D) -> Vec<u64>
+    where
+        D: CsrInput + ?Sized,
+    {
+        assert_eq!(d.rows(), self.row_weights[0].len());
+        assert_eq!(d.cols(), self.col_weights[0].len());
         let lanes = self.lanes();
         let mut out = vec![0u64; lanes];
-        for i in 0..d.rows {
+        for i in 0..d.rows() {
             for (j, value) in d.row(i) {
                 let vm = signed_mod(value);
                 for lane in 0..lanes {
@@ -135,7 +142,10 @@ impl ResidualFingerprint {
     }
 
     #[inline]
-    pub fn verifies(&self, d: &CsrMatrix) -> bool {
+    pub fn verifies<D>(&self, d: &D) -> bool
+    where
+        D: CsrInput + ?Sized,
+    {
         self.fingerprint(d) == self.target
     }
 
@@ -218,6 +228,7 @@ fn splitmix64(mut x: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix::CsrMatrix;
     use crate::spgemm::spgemm_hash;
 
     #[test]

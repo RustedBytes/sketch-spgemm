@@ -1,4 +1,4 @@
-use crate::matrix::{CsrMatrix, DenseMatrix};
+use crate::matrix::{CsrInput, DenseMatrix};
 
 /// Implicit binary, column-sparse sketch matrix.
 ///
@@ -54,11 +54,14 @@ fn splitmix64(mut x: u64) -> u64 {
 
 /// Compute H*A without materializing H.
 /// A has shape r x n, H has shape m x r, result is dense m x n.
-pub fn left_sketch(a: &CsrMatrix, h: &SketchMap) -> DenseMatrix {
-    assert_eq!(h.domain, a.rows);
-    let mut out = DenseMatrix::zeros(h.bucket_count, a.cols);
+pub fn left_sketch<A>(a: &A, h: &SketchMap) -> DenseMatrix
+where
+    A: CsrInput + ?Sized,
+{
+    assert_eq!(h.domain, a.rows());
+    let mut out = DenseMatrix::zeros(h.bucket_count, a.cols());
 
-    for i in 0..a.rows {
+    for i in 0..a.rows() {
         let buckets = h.buckets(i);
         for (k, value) in a.row(i) {
             for &b in &buckets {
@@ -71,16 +74,19 @@ pub fn left_sketch(a: &CsrMatrix, h: &SketchMap) -> DenseMatrix {
 
 /// Compute B*G^T without materializing G.
 /// B has shape n x c, G has shape g x c, result is dense n x g.
-pub fn right_sketch(b: &CsrMatrix, g: &SketchMap) -> DenseMatrix {
-    assert_eq!(g.domain, b.cols);
-    let mut out = DenseMatrix::zeros(b.rows, g.bucket_count);
+pub fn right_sketch<B>(b: &B, g: &SketchMap) -> DenseMatrix
+where
+    B: CsrInput + ?Sized,
+{
+    assert_eq!(g.domain, b.cols());
+    let mut out = DenseMatrix::zeros(b.rows(), g.bucket_count);
 
     // B is row-major, so the same logical output-column map is revisited many
     // times. Materialize each tiny bucket list once instead of hashing and
     // allocating a Vec for every nonzero of B.
     let buckets_by_column: Vec<Vec<usize>> = (0..g.domain).map(|j| g.buckets(j)).collect();
 
-    for k in 0..b.rows {
+    for k in 0..b.rows() {
         for (j, value) in b.row(k) {
             for &bucket in &buckets_by_column[j] {
                 out[(k, bucket)] += value;
@@ -92,14 +98,17 @@ pub fn right_sketch(b: &CsrMatrix, g: &SketchMap) -> DenseMatrix {
 
 /// Directly compute H*C*G^T from a sparse C. Used only as a correctness oracle
 /// for the identity H(AB)G^T = (HA)(BG^T).
-pub fn direct_two_sided_sketch(c: &CsrMatrix, h: &SketchMap, g: &SketchMap) -> DenseMatrix {
-    assert_eq!(h.domain, c.rows);
-    assert_eq!(g.domain, c.cols);
+pub fn direct_two_sided_sketch<C>(c: &C, h: &SketchMap, g: &SketchMap) -> DenseMatrix
+where
+    C: CsrInput + ?Sized,
+{
+    assert_eq!(h.domain, c.rows());
+    assert_eq!(g.domain, c.cols());
     let mut out = DenseMatrix::zeros(h.bucket_count, g.bucket_count);
     let h_rows: Vec<Vec<usize>> = (0..h.domain).map(|i| h.buckets(i)).collect();
     let g_rows: Vec<Vec<usize>> = (0..g.domain).map(|j| g.buckets(j)).collect();
 
-    for i in 0..c.rows {
+    for i in 0..c.rows() {
         let hb = &h_rows[i];
         for (j, value) in c.row(i) {
             let gb = &g_rows[j];

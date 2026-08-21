@@ -1,11 +1,79 @@
 use std::collections::BTreeMap;
 use std::ops::{AddAssign, Index, IndexMut};
+use std::slice;
 
 /// Exact scalar used by the sketch, recovery, and fingerprint algorithms.
 ///
 /// The matrix containers are generic, but the current algorithms intentionally
 /// keep exact `i64` arithmetic through this default.
 pub type Scalar = i64;
+
+/// Read-only access to a canonical CSR matrix over [`Scalar`].
+///
+/// Implementations must yield every row in strictly increasing column order,
+/// without duplicate columns or explicitly stored zero values. Every yielded
+/// column must be smaller than [`cols`](Self::cols), and [`nnz`](Self::nnz)
+/// must equal the total number of yielded entries. Algorithms may rely on
+/// these invariants without rescanning the complete input.
+pub trait CsrInput {
+    /// Iterator returned for a borrowed matrix row.
+    type RowIter<'a>: Iterator<Item = (usize, Scalar)>
+    where
+        Self: 'a;
+
+    /// Number of matrix rows.
+    fn rows(&self) -> usize;
+
+    /// Number of matrix columns.
+    fn cols(&self) -> usize;
+
+    /// Number of explicitly stored nonzero values.
+    fn nnz(&self) -> usize;
+
+    /// Iterate over `(column, value)` pairs in `row`.
+    ///
+    /// # Panics
+    ///
+    /// May panic when `row >= self.rows()`.
+    fn row(&self, row: usize) -> Self::RowIter<'_>;
+
+    /// Materialize this sparse input as a row-major dense matrix.
+    fn to_dense(&self) -> DenseMatrix {
+        let mut dense = DenseMatrix::zeros(self.rows(), self.cols());
+        for row in 0..self.rows() {
+            for (column, value) in self.row(row) {
+                dense[(row, column)] = value;
+            }
+        }
+        dense
+    }
+}
+
+/// Borrowing row iterator for [`CsrMatrix<i64>`].
+#[derive(Clone, Debug)]
+pub struct CsrRowIter<'a> {
+    columns: slice::Iter<'a, usize>,
+    values: slice::Iter<'a, Scalar>,
+}
+
+impl Iterator for CsrRowIter<'_> {
+    type Item = (usize, Scalar);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.columns
+            .next()
+            .zip(self.values.next())
+            .map(|(&column, &value)| (column, value))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.columns.size_hint()
+    }
+}
+
+impl ExactSizeIterator for CsrRowIter<'_> {}
 
 /// Representation-independent matrix metadata.
 ///
@@ -142,6 +210,35 @@ impl<T> MatrixLike for CsrMatrix<T> {
     #[inline]
     fn nnz(&self) -> usize {
         self.nnz()
+    }
+}
+
+impl CsrInput for CsrMatrix<Scalar> {
+    type RowIter<'a> = CsrRowIter<'a>;
+
+    #[inline]
+    fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[inline]
+    fn cols(&self) -> usize {
+        self.cols
+    }
+
+    #[inline]
+    fn nnz(&self) -> usize {
+        self.values.len()
+    }
+
+    #[inline]
+    fn row(&self, row: usize) -> Self::RowIter<'_> {
+        let start = self.row_ptr[row];
+        let end = self.row_ptr[row + 1];
+        CsrRowIter {
+            columns: self.col_idx[start..end].iter(),
+            values: self.values[start..end].iter(),
+        }
     }
 }
 

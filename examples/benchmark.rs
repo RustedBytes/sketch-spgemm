@@ -395,7 +395,7 @@ fn main() {
         let start = Instant::now();
         let (auto_result, auto_stats) = auto_spgemm(&problem.a, &problem.b, auto_cfg);
         let auto_time = start.elapsed();
-        println!("\nAutoSpGEMM v0.8.0 (does not use true K):");
+        println!("\nAutoSpGEMM v0.9.0 (does not use true K):");
         println!("  total: {}", fmt_duration(auto_time));
         println!("  choice: {:?}", auto_stats.choice);
         println!(
@@ -458,7 +458,7 @@ fn main() {
     println!("  With --identity-fallback true, literal GUV constants often select I_N;");
     println!("  this is expected and follows the recovery theorem's smaller-row fallback.");
     println!("  --guaranteed-correction true adds a validation-only exact residual pass.");
-    println!("  v0.8.0 adds generic matrix containers and a unified representation boundary.");
+    println!("  v0.9.0 adds generic borrowed CSR inputs and optional ecosystem adapters.");
     println!("  support masking, practical q scheduling, and v0.5 cache hierarchy remain enabled.");
     println!("  --rect-kernel auto dispatches dense/sparse rectangular multiplication per round.");
 }

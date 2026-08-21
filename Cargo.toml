@@ -1,8 +1,8 @@
 [package]
 name = "sketch-spgemm"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.91"
 autobins = false
 description = "Adaptive SketchSpGEMM with low-overhead auto selection and fused residual fingerprints"
 license = "MIT"
@@ -22,6 +22,11 @@ include = [
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+default = []
+sprs = ["dep:sprs"]
+petgraph = ["dep:petgraph", "petgraph/stable_graph"]
+
 [lib]
 name = "sketch_spgemm"
 path = "src/lib.rs"
@@ -30,8 +35,20 @@ path = "src/lib.rs"
 name = "benchmark"
 path = "examples/benchmark.rs"
 
+[[example]]
+name = "sprs"
+path = "examples/sprs.rs"
+required-features = ["sprs"]
+
+[[example]]
+name = "petgraph"
+path = "examples/petgraph.rs"
+required-features = ["petgraph"]
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
 
 [dependencies]
+petgraph = { version = "0.8.3", optional = true, default-features = false }
+sprs = { version = "0.11.5", optional = true, default-features = false }

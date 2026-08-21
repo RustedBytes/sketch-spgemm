@@ -88,7 +88,7 @@ forcing sketch recovery.
 
 Requirements:
 
-- Rust stable toolchain with Cargo
+- Rust 1.91 or newer with Cargo
 
 Clone the repository, run the tests, and execute the default benchmark:
 
@@ -134,6 +134,97 @@ let (c, stats) = auto_spgemm(&a, &b, AutoSpGemmConfig::default());
 ```
 
 It does not receive the true product or `nnz(C)`.
+
+For borrowed CSR implementations, use the fallible generic entry point:
+
+```rust
+use sketch_spgemm::{try_auto_spgemm, AutoSpGemmConfig, CsrInput};
+
+fn multiply<A: CsrInput, B: CsrInput>(a: &A, b: &B) {
+    let (product, stats) =
+        try_auto_spgemm(a, b, AutoSpGemmConfig::default()).unwrap();
+    println!("{} nonzeros via {:?}", product.nnz(), stats.choice);
+}
+```
+
+`CsrInput` is fixed to the algorithms' `i64` scalar and requires canonical
+CSR rows: sorted unique columns and no explicit zeros. It lets external sparse
+containers participate without first copying their complete input into
+`CsrMatrix`.
+
+## Ecosystem integrations
+
+Integrations are optional and disabled by default, keeping the core crate's
+dependency graph empty:
+
+```bash
+cargo add sketch-spgemm --features sprs
+cargo add sketch-spgemm --features petgraph
+```
+
+The repository includes complete runnable examples:
+
+```bash
+cargo run --example sprs --features sprs
+cargo run --example petgraph --features petgraph
+```
+
+### `sprs`
+
+The `sprs` feature accepts borrowed `CsMatViewI<'_, i64, I, Iptr>` operands and
+returns an owning `CsMatI<i64, I, Iptr>`. Input values, indices, and row pointers
+are read in place; CSC is rejected because converting it would violate the
+zero-copy CSR contract. Explicit stored zeros are ignored. The inputs must use
+the same `sprs` index types, and an output index overflow is reported as an
+error.
+
+```rust
+use sketch_spgemm::AutoSpGemmConfig;
+use sketch_spgemm::interop::sprs::auto_spgemm;
+use sprs::CsMat;
+
+let a = CsMat::new((1, 2), vec![0, 2], vec![0, 1], vec![2_i64, 3]);
+let b = CsMat::new((2, 1), vec![0, 1, 2], vec![0, 0], vec![5_i64, 7]);
+let (c, _) = auto_spgemm(a.view(), b.view(), AutoSpGemmConfig::default())?;
+assert_eq!(c.get(0, 0), Some(&31));
+# Ok::<(), sketch_spgemm::SpGemmError>(())
+```
+
+This is a downstream adapter in `sketch-spgemm`; neither `sprs` nor its public
+API needs to change.
+
+### `petgraph`
+
+The `petgraph` feature exposes `adjacency_csr` and `two_hop_path_counts` for any
+graph view implementing `IntoNodeIdentifiers + IntoEdges + NodeIndexable`.
+Edge weights are mapped to `i64`; parallel weights sum, undirected adjacency is
+symmetric, and `NodeIndexable::node_bound` preserves vacant `StableGraph`
+indices. The product remains `sketch_spgemm::CsrMatrix<i64>` for subsequent
+library operations.
+
+```rust
+use petgraph::graph::DiGraph;
+use sketch_spgemm::AutoSpGemmConfig;
+use sketch_spgemm::interop::petgraph::two_hop_path_counts;
+
+let mut graph = DiGraph::<(), i64>::new();
+let a = graph.add_node(());
+let b = graph.add_node(());
+let c = graph.add_node(());
+graph.add_edge(a, b, 2);
+graph.add_edge(b, c, 7);
+
+let (paths, _) = two_hop_path_counts(
+    &graph,
+    |weight| *weight,
+    AutoSpGemmConfig::default(),
+)?;
+assert_eq!(paths.row(a.index()).collect::<Vec<_>>(), vec![(c.index(), 14)]);
+# Ok::<(), sketch_spgemm::SpGemmError>(())
+```
+
+This integration works entirely through `petgraph` visitor traits, so no
+upstream storage exposure or API adjustment is required.
 
 ## Matrix types
 
@@ -303,7 +394,9 @@ sampling, nested recovery, fingerprint setup and checks, and exact fallback.
 
 ```text
 auto_spgemm(...)                   automatic exact/sketch selection
+try_auto_spgemm(...)               fallible generic CsrInput entry point
 analyze_workload(...)              workload estimator
+try_analyze_workload(...)          fallible generic workload estimator
 nested_spgemm(...)                 theorem-oriented control flow
 nested_spgemm_with_policy(...)     custom rectangular policy
 nested_spgemm_with_options(...)    engineering controls
@@ -312,8 +405,12 @@ adaptive_matmul_prepared(...)      cached-factor rectangular multiplication
 spgemm_hash(...)                   exact CSR baseline
 ```
 
-## What's new in v0.8.0
+## What's new in v0.9.0
 
+- Optional zero-copy `sprs` CSR input and native-output integration.
+- Optional weighted `petgraph` adjacency and two-hop path-count integration.
+- Public `CsrInput` trait and fallible generic automatic APIs.
+- Structured dimension, storage, index, and output-construction errors.
 - Generic `CsrMatrix<T>` and `DenseMatrix<T>` containers with backward-
   compatible `i64` defaults.
 - Shared `MatrixLike` metadata and a `Matrix<T>` boundary enum.
@@ -331,7 +428,7 @@ spgemm_hash(...)                   exact CSR baseline
   fingerprint APIs currently operate on exact signed 64-bit integers.
 - Arithmetic overflow is not converted into a recoverable error.
 - Execution is CPU-only and currently single-process.
-- There are no CUDA, Metal, distributed, or production storage integrations.
+- There are no CUDA, Metal, or distributed integrations.
 - The practical moment/fingerprint path is probabilistic rather than the
   deterministic theorem from the motivating paper.
 - Performance depends strongly on output geometry. Sparse inputs alone do not
@@ -345,6 +442,7 @@ src/
 ├── auto.rs        workload sampling and exact/sketch selection
 ├── fingerprint.rs bilinear residual certificate over 2^61 - 1
 ├── guv.rs         explicit GUV finite-field construction
+├── interop/       optional sprs and petgraph adapters
 ├── matrix.rs      CSR and dense integer matrix primitives
 ├── recovery.rs    recovery backends, masks, schedulers, and caches
 ├── rect.rs        adaptive rectangular kernels and prepared factors

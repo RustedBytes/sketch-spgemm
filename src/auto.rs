@@ -1,5 +1,6 @@
+use crate::error::SpGemmError;
 use crate::fingerprint::FingerprintConfig;
-use crate::matrix::CsrMatrix;
+use crate::matrix::{CsrInput, CsrMatrix};
 use crate::recovery::{
     nested_spgemm_with_options, MomentConfig, NestedOptions, NestedSpGemmStats, RecoveryBackend,
 };
@@ -131,7 +132,37 @@ pub fn auto_spgemm(
     b: &CsrMatrix,
     config: AutoSpGemmConfig,
 ) -> (CsrMatrix, AutoSpGemmStats) {
-    assert_eq!(a.cols, b.rows, "incompatible matrix dimensions");
+    try_auto_spgemm(a, b, config).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Multiplies two borrowed canonical CSR matrices, selecting the exact or
+/// sketch implementation automatically.
+///
+/// Unlike [`auto_spgemm`], this entry point accepts any [`CsrInput`] and
+/// reports incompatible shapes as an error.
+pub fn try_auto_spgemm<A, B>(
+    a: &A,
+    b: &B,
+    config: AutoSpGemmConfig,
+) -> Result<(CsrMatrix, AutoSpGemmStats), SpGemmError>
+where
+    A: CsrInput + ?Sized,
+    B: CsrInput + ?Sized,
+{
+    if a.cols() != b.rows() {
+        return Err(SpGemmError::DimensionMismatch {
+            left: (a.rows(), a.cols()),
+            right: (b.rows(), b.cols()),
+        });
+    }
+    Ok(auto_spgemm_impl(a, b, config))
+}
+
+fn auto_spgemm_impl<A, B>(a: &A, b: &B, config: AutoSpGemmConfig) -> (CsrMatrix, AutoSpGemmStats)
+where
+    A: CsrInput + ?Sized,
+    B: CsrInput + ?Sized,
+{
     let total_start = Instant::now();
     let (estimate, analysis_timing) = analyze_workload_timed(a, b, &config);
     let mut timing = AutoTimingStats {
@@ -166,7 +197,7 @@ pub fn auto_spgemm(
         );
     }
 
-    let max_k = a.rows.saturating_mul(b.cols).max(1);
+    let max_k = a.rows().saturating_mul(b.cols()).max(1);
     let k_bound =
         ((estimate.estimated_output_nnz as f64) * config.k_safety_factor.max(1.0)).ceil() as usize;
     let k_bound = k_bound.clamp(1, max_k);
@@ -259,15 +290,38 @@ pub fn analyze_workload(
     b: &CsrMatrix,
     config: &AutoSpGemmConfig,
 ) -> WorkloadEstimate {
-    analyze_workload_timed(a, b, config).0
+    try_analyze_workload(a, b, config).unwrap_or_else(|error| panic!("{error}"))
 }
 
-fn analyze_workload_timed(
-    a: &CsrMatrix,
-    b: &CsrMatrix,
+/// Estimates the multiplication workload for any borrowed canonical CSR input.
+pub fn try_analyze_workload<A, B>(
+    a: &A,
+    b: &B,
     config: &AutoSpGemmConfig,
-) -> (WorkloadEstimate, AnalysisTiming) {
-    assert_eq!(a.cols, b.rows);
+) -> Result<WorkloadEstimate, SpGemmError>
+where
+    A: CsrInput + ?Sized,
+    B: CsrInput + ?Sized,
+{
+    if a.cols() != b.rows() {
+        return Err(SpGemmError::DimensionMismatch {
+            left: (a.rows(), a.cols()),
+            right: (b.rows(), b.cols()),
+        });
+    }
+    Ok(analyze_workload_timed(a, b, config).0)
+}
+
+fn analyze_workload_timed<A, B>(
+    a: &A,
+    b: &B,
+    config: &AutoSpGemmConfig,
+) -> (WorkloadEstimate, AnalysisTiming)
+where
+    A: CsrInput + ?Sized,
+    B: CsrInput + ?Sized,
+{
+    debug_assert_eq!(a.cols(), b.rows());
     let total_start = Instant::now();
     let mut timing = AnalysisTiming::default();
 
@@ -275,10 +329,10 @@ fn analyze_workload_timed(
     let candidate_products = candidate_product_count(a, b);
     timing.candidate_count = start.elapsed();
 
-    let output_cells = a.rows.saturating_mul(b.cols).max(1);
+    let output_cells = a.rows().saturating_mul(b.cols()).max(1);
     let structural_amplification = candidate_products as f64 / output_cells as f64;
 
-    if a.rows == 0 || b.cols == 0 {
+    if a.rows() == 0 || b.cols() == 0 {
         timing.total = total_start.elapsed();
         return (
             empty_estimate(
@@ -307,21 +361,21 @@ fn analyze_workload_timed(
     }
 
     let start = Instant::now();
-    let max_samples = config.sample_rows.max(1).min(a.rows);
+    let max_samples = config.sample_rows.max(1).min(a.rows());
     let initial_samples = config.initial_sample_rows.max(1).min(max_samples);
-    let sample_indices = evenly_spaced_rows(a.rows, max_samples);
+    let sample_indices = evenly_spaced_rows(a.rows(), max_samples);
 
     // v0.7.1: exact sampled rows use a dense scratch accumulator plus touched
     // columns, avoiding HashMap hashing/allocation for every candidate product.
-    let mut acc = vec![0i64; b.cols];
-    let mut stamp = vec![0u32; b.cols];
+    let mut acc = vec![0i64; b.cols()];
+    let mut stamp = vec![0u32; b.cols()];
     let mut generation = 1u32;
-    let mut globally_seen = vec![false; b.cols];
+    let mut globally_seen = vec![false; b.cols()];
     let mut sampled_output_nnz = 0usize;
     let mut sampled_rows = 0usize;
     let mut unique_columns = 0usize;
     let mut current_estimate: Option<WorkloadEstimate> = None;
-    let mut touched = Vec::with_capacity(b.cols.min(4096));
+    let mut touched = Vec::with_capacity(b.cols().min(4096));
 
     for (pos, &i) in sample_indices.iter().enumerate() {
         touched.clear();
@@ -412,41 +466,45 @@ fn empty_estimate(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn estimate_from_sample(
-    a: &CsrMatrix,
-    b: &CsrMatrix,
+fn estimate_from_sample<A, B>(
+    a: &A,
+    b: &B,
     config: &AutoSpGemmConfig,
     candidate_products: u128,
     structural_amplification: f64,
     sampled_rows: usize,
     sampled_output_nnz: usize,
     unique_columns: usize,
-) -> WorkloadEstimate {
+) -> WorkloadEstimate
+where
+    A: CsrInput + ?Sized,
+    B: CsrInput + ?Sized,
+{
     let estimated_output_nnz = if sampled_rows == 0 {
         0
     } else {
-        ((sampled_output_nnz as u128 * a.rows as u128 + sampled_rows as u128 / 2)
+        ((sampled_output_nnz as u128 * a.rows() as u128 + sampled_rows as u128 / 2)
             / sampled_rows as u128) as usize
     }
-    .min(a.rows.saturating_mul(b.cols));
+    .min(a.rows().saturating_mul(b.cols()));
 
-    let sample_fraction = if a.rows == 0 {
+    let sample_fraction = if a.rows() == 0 {
         1.0
     } else {
-        sampled_rows as f64 / a.rows as f64
+        sampled_rows as f64 / a.rows() as f64
     };
     let estimated_active_columns = estimate_active_columns(
         unique_columns,
         estimated_output_nnz,
         sample_fraction,
-        b.cols,
+        b.cols(),
     );
     let avg_col = if estimated_active_columns == 0 {
         0.0
     } else {
         estimated_output_nnz as f64 / estimated_active_columns as f64
     };
-    let output_cells = a.rows.saturating_mul(b.cols).max(1);
+    let output_cells = a.rows().saturating_mul(b.cols()).max(1);
     let output_density = estimated_output_nnz as f64 / output_cells as f64;
     let rho = if estimated_output_nnz == 0 {
         f64::INFINITY
@@ -458,18 +516,18 @@ fn estimate_from_sample(
     } else {
         (avg_col.round().max(1.0) as usize)
             .next_power_of_two()
-            .min(a.rows.max(1))
+            .min(a.rows().max(1))
     };
     let buckets = (((target_q as f64) * config.moment.oversampling).ceil() as usize)
         .max(config.moment.degree)
-        .min(a.rows.max(1));
+        .min(a.rows().max(1));
     let raw_moment_rows = buckets.saturating_mul(3);
-    let estimated_moment_rows = if config.moment.identity_fallback && raw_moment_rows >= a.rows {
-        a.rows
+    let estimated_moment_rows = if config.moment.identity_fallback && raw_moment_rows >= a.rows() {
+        a.rows()
     } else {
         raw_moment_rows
     };
-    let row_ratio = estimated_moment_rows as f64 / a.rows.max(1) as f64;
+    let row_ratio = estimated_moment_rows as f64 / a.rows().max(1) as f64;
 
     let mut reasons = Vec::new();
     if rho < config.min_estimated_rho {
@@ -553,13 +611,15 @@ fn classification_is_confident(e: &WorkloadEstimate, config: &AutoSpGemmConfig) 
     }
 }
 
-pub fn candidate_product_count(a: &CsrMatrix, b: &CsrMatrix) -> u128 {
-    assert_eq!(a.cols, b.rows);
-    let b_degree: Vec<usize> = (0..b.rows)
-        .map(|k| b.row_ptr[k + 1] - b.row_ptr[k])
-        .collect();
+pub fn candidate_product_count<A, B>(a: &A, b: &B) -> u128
+where
+    A: CsrInput + ?Sized,
+    B: CsrInput + ?Sized,
+{
+    assert_eq!(a.cols(), b.rows());
+    let b_degree: Vec<usize> = (0..b.rows()).map(|k| b.row(k).count()).collect();
     let mut total = 0u128;
-    for i in 0..a.rows {
+    for i in 0..a.rows() {
         for (k, _) in a.row(i) {
             total += b_degree[k] as u128;
         }
@@ -567,17 +627,21 @@ pub fn candidate_product_count(a: &CsrMatrix, b: &CsrMatrix) -> u128 {
     total
 }
 
-fn exact_dispatch(
-    a: &CsrMatrix,
-    b: &CsrMatrix,
+fn exact_dispatch<A, B>(
+    a: &A,
+    b: &B,
     policy: RectangularPolicy,
     dense_cell_limit: usize,
-) -> (CsrMatrix, Option<RectangularStats>, ExactMethod) {
+) -> (CsrMatrix, Option<RectangularStats>, ExactMethod)
+where
+    A: CsrInput + ?Sized,
+    B: CsrInput + ?Sized,
+{
     let dense_cells = a
-        .rows
-        .saturating_mul(a.cols)
-        .saturating_add(b.rows.saturating_mul(b.cols))
-        .saturating_add(a.rows.saturating_mul(b.cols));
+        .rows()
+        .saturating_mul(a.cols())
+        .saturating_add(b.rows().saturating_mul(b.cols()))
+        .saturating_add(a.rows().saturating_mul(b.cols()));
     if dense_cells <= dense_cell_limit {
         let ad = a.to_dense();
         let bd = b.to_dense();
@@ -680,6 +744,20 @@ mod tests {
         assert!(!e.choose_sketch);
         assert!(e.structural_prefilter_only);
         assert_eq!(e.sampled_rows, 0);
+    }
+
+    #[test]
+    fn fallible_api_reports_both_incompatible_shapes() {
+        let left = CsrMatrix::zeros(2, 3);
+        let right = CsrMatrix::zeros(4, 5);
+        let error = try_auto_spgemm(&left, &right, AutoSpGemmConfig::default()).unwrap_err();
+        assert_eq!(
+            error,
+            SpGemmError::DimensionMismatch {
+                left: (2, 3),
+                right: (4, 5),
+            }
+        );
     }
 
     #[test]

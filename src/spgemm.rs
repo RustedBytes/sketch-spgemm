@@ -1,4 +1,4 @@
-use crate::matrix::{CsrMatrix, DenseMatrix};
+use crate::matrix::{CsrInput, CsrMatrix, DenseMatrix};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
@@ -9,13 +9,17 @@ pub struct SpGemmStats {
 /// Baseline row-wise hash-accumulator SpGEMM over i64.
 /// This is intentionally simple: it is a correctness/baseline kernel, not a
 /// replacement for SuiteSparse/Kokkos/cuSPARSE.
-pub fn spgemm_hash(a: &CsrMatrix, b: &CsrMatrix) -> (CsrMatrix, SpGemmStats) {
-    assert_eq!(a.cols, b.rows, "incompatible matrix dimensions");
+pub fn spgemm_hash<A, B>(a: &A, b: &B) -> (CsrMatrix, SpGemmStats)
+where
+    A: CsrInput + ?Sized,
+    B: CsrInput + ?Sized,
+{
+    assert_eq!(a.cols(), b.rows(), "incompatible matrix dimensions");
 
     let mut triplets = Vec::new();
     let mut stats = SpGemmStats::default();
 
-    for i in 0..a.rows {
+    for i in 0..a.rows() {
         let mut acc: HashMap<usize, i64> = HashMap::new();
         for (k, av) in a.row(i) {
             for (j, bv) in b.row(k) {
@@ -29,7 +33,10 @@ pub fn spgemm_hash(a: &CsrMatrix, b: &CsrMatrix) -> (CsrMatrix, SpGemmStats) {
         triplets.extend(row.into_iter().map(|(j, v)| (i, j, v)));
     }
 
-    (CsrMatrix::from_triplets(a.rows, b.cols, &triplets), stats)
+    (
+        CsrMatrix::from_triplets(a.rows(), b.cols(), &triplets),
+        stats,
+    )
 }
 
 /// Straightforward dense rectangular GEMM. The inner loop skips zero entries in

@@ -1,6 +1,6 @@
 use crate::fingerprint::{FingerprintConfig, FingerprintStats, ResidualFingerprint};
 use crate::guv::{GuvConfig, GuvParameters, GuvRecovery};
-use crate::matrix::{CsrMatrix, DenseMatrix};
+use crate::matrix::{CsrInput, CsrMatrix, DenseMatrix};
 use crate::rect::{
     adaptive_matmul_prepared, PreparedFactor, RectangularKernel, RectangularPolicy,
     RectangularStats,
@@ -535,23 +535,31 @@ pub struct CorrectionPassStats {
 /// Parvaresh-Vardy/GUV graph from Bennett et al. Appendix A. When a backend's
 /// `guaranteed_correction` flag is enabled, an exact identity residual pass is
 /// appended as an implementation-validation fallback.
-pub fn nested_spgemm(
-    a: &CsrMatrix,
-    b: &CsrMatrix,
+pub fn nested_spgemm<A, B>(
+    a: &A,
+    b: &B,
     k_bound: usize,
     backend: RecoveryBackend,
-) -> (CsrMatrix, NestedSpGemmStats) {
+) -> (CsrMatrix, NestedSpGemmStats)
+where
+    A: CsrInput + ?Sized,
+    B: CsrInput + ?Sized,
+{
     nested_spgemm_with_options(a, b, k_bound, backend, NestedOptions::default())
 }
 
 /// Backward-compatible v0.5 entry point with only a rectangular-kernel policy.
-pub fn nested_spgemm_with_policy(
-    a: &CsrMatrix,
-    b: &CsrMatrix,
+pub fn nested_spgemm_with_policy<A, B>(
+    a: &A,
+    b: &B,
     k_bound: usize,
     backend: RecoveryBackend,
     rectangular_policy: RectangularPolicy,
-) -> (CsrMatrix, NestedSpGemmStats) {
+) -> (CsrMatrix, NestedSpGemmStats)
+where
+    A: CsrInput + ?Sized,
+    B: CsrInput + ?Sized,
+{
     nested_spgemm_with_options(
         a,
         b,
@@ -568,16 +576,20 @@ pub fn nested_spgemm_with_policy(
 /// `NestedOptions::default()`. Practical scheduling and support masking are
 /// explicitly opt-in at the library level; the benchmark CLI enables them by
 /// default so their effect is visible.
-pub fn nested_spgemm_with_options(
-    a: &CsrMatrix,
-    b: &CsrMatrix,
+pub fn nested_spgemm_with_options<A, B>(
+    a: &A,
+    b: &B,
     k_bound: usize,
     backend: RecoveryBackend,
     options: NestedOptions,
-) -> (CsrMatrix, NestedSpGemmStats) {
-    assert_eq!(a.cols, b.rows, "incompatible matrix dimensions");
-    let r = a.rows;
-    let c = b.cols;
+) -> (CsrMatrix, NestedSpGemmStats)
+where
+    A: CsrInput + ?Sized,
+    B: CsrInput + ?Sized,
+{
+    assert_eq!(a.cols(), b.rows(), "incompatible matrix dimensions");
+    let r = a.rows();
+    let c = b.cols();
     let k = k_bound.min(r.saturating_mul(c));
 
     if r == 0 || c == 0 || k == 0 {
@@ -1263,17 +1275,20 @@ fn build_recovery_matrix(
 }
 
 /// Compute H*A for any binary recovery matrix H without materializing H.
-pub fn left_recovery_sketch(a: &CsrMatrix, h: &BinaryRecoveryMatrix) -> DenseMatrix {
-    assert_eq!(h.domain(), a.rows);
+pub fn left_recovery_sketch<A>(a: &A, h: &BinaryRecoveryMatrix) -> DenseMatrix
+where
+    A: CsrInput + ?Sized,
+{
+    assert_eq!(h.domain(), a.rows());
     if h.is_identity() {
         return a.to_dense();
     }
 
-    let mut out = DenseMatrix::zeros(h.rows(), a.cols);
+    let mut out = DenseMatrix::zeros(h.rows(), a.cols());
     let rows_by_index: Vec<Vec<(usize, i64)>> = (0..h.domain())
         .map(|i| h.weighted_rows_for_index(i))
         .collect();
-    for i in 0..a.rows {
+    for i in 0..a.rows() {
         let measurement_rows = &rows_by_index[i];
         for (k, value) in a.row(i) {
             for &(mr, coeff) in measurement_rows {
@@ -1285,20 +1300,23 @@ pub fn left_recovery_sketch(a: &CsrMatrix, h: &BinaryRecoveryMatrix) -> DenseMat
 }
 
 /// Compute B*G^T for any binary recovery matrix G without materializing G.
-pub fn right_recovery_sketch(b: &CsrMatrix, g: &BinaryRecoveryMatrix) -> DenseMatrix {
-    assert_eq!(g.domain(), b.cols);
+pub fn right_recovery_sketch<B>(b: &B, g: &BinaryRecoveryMatrix) -> DenseMatrix
+where
+    B: CsrInput + ?Sized,
+{
+    assert_eq!(g.domain(), b.cols());
     if g.is_identity() {
         return b.to_dense();
     }
 
-    let mut out = DenseMatrix::zeros(b.rows, g.rows());
+    let mut out = DenseMatrix::zeros(b.rows(), g.rows());
     // Cache the column mapping once. In CSR traversal the same output column j
     // can occur in many B rows, so recomputing rows_for_index(j) inside the nnz
     // loop caused a large amount of hashing/allocation work in v0.4.
     let rows_by_column: Vec<Vec<(usize, i64)>> = (0..g.domain())
         .map(|j| g.weighted_rows_for_index(j))
         .collect();
-    for k in 0..b.rows {
+    for k in 0..b.rows() {
         for (j, value) in b.row(k) {
             for &(mr, coeff) in &rows_by_column[j] {
                 out[(k, mr)] += value * coeff;
@@ -1310,16 +1328,19 @@ pub fn right_recovery_sketch(b: &CsrMatrix, g: &BinaryRecoveryMatrix) -> DenseMa
 
 /// Compute B*G^T while ignoring output columns not present in `mask`.
 /// This is the v0.6 practical support-restricted multiplication path.
-pub fn right_recovery_sketch_masked(
-    b: &CsrMatrix,
+pub fn right_recovery_sketch_masked<B>(
+    b: &B,
     g: &BinaryRecoveryMatrix,
     mask: &[bool],
-) -> DenseMatrix {
-    assert_eq!(g.domain(), b.cols);
-    assert_eq!(mask.len(), b.cols);
+) -> DenseMatrix
+where
+    B: CsrInput + ?Sized,
+{
+    assert_eq!(g.domain(), b.cols());
+    assert_eq!(mask.len(), b.cols());
     if g.is_identity() {
-        let mut out = DenseMatrix::zeros(b.rows, b.cols);
-        for k in 0..b.rows {
+        let mut out = DenseMatrix::zeros(b.rows(), b.cols());
+        for k in 0..b.rows() {
             for (j, value) in b.row(k) {
                 if mask[j] {
                     out[(k, j)] = value;
@@ -1329,11 +1350,11 @@ pub fn right_recovery_sketch_masked(
         return out;
     }
 
-    let mut out = DenseMatrix::zeros(b.rows, g.rows());
+    let mut out = DenseMatrix::zeros(b.rows(), g.rows());
     let rows_by_column: Vec<Vec<(usize, i64)>> = (0..g.domain())
         .map(|j| g.weighted_rows_for_index(j))
         .collect();
-    for k in 0..b.rows {
+    for k in 0..b.rows() {
         for (j, value) in b.row(k) {
             if !mask[j] {
                 continue;
