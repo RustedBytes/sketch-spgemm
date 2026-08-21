@@ -4,7 +4,7 @@ version = "0.8.0"
 edition = "2021"
 rust-version = "1.70"
 description = "Adaptive SketchSpGEMM with low-overhead auto selection and fused residual fingerprints"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/RustedBytes/sketch-spgemm"
 documentation = "https://docs.rs/sketch-spgemm"
 readme = "README.md"
@@ -14,7 +14,6 @@ include = [
     "src/**/*.rs",
     "Cargo.toml",
     "README.md",
-    "LICENSE-APACHE",
     "LICENSE-MIT",
 ]
 

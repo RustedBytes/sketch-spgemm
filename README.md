@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/sketch-spgemm.svg)](https://crates.io/crates/sketch-spgemm)
 [![Documentation](https://docs.rs/sketch-spgemm/badge.svg)](https://docs.rs/sketch-spgemm)
-[![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/sketch-spgemm.svg)](#license)
+[![License: MIT](https://img.shields.io/crates/l/sketch-spgemm.svg)](#license)
 
 Adaptive, sketch-based sparse matrix multiplication in Rust.
 
@@ -366,7 +366,4 @@ kernels, additional datasets, property testing, and reproducible benchmarks.
 
 ## License
 
-Licensed under either of the following, at your option:
-
-- [Apache License, Version 2.0](LICENSE-APACHE)
-- [MIT License](LICENSE-MIT)
+Licensed under the [MIT License](LICENSE-MIT).
