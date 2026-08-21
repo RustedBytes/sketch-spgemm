@@ -377,17 +377,33 @@ mod tests {
     }
 
     #[test]
-    fn auto_prefers_sparse_sparse_for_very_sparse_factors() {
+    fn auto_accounts_for_sparse_view_build_cost() {
         let mut a = DenseMatrix::zeros(128, 128);
         let mut b = DenseMatrix::zeros(128, 128);
         for i in 0..8 {
             a[(i, i)] = 1;
             b[(i, i)] = 1;
         }
+
+        // Sparse×sparse would issue only 8 multiplies, but adaptive_matmul must
+        // first scan both dense factor buffers to construct sparse row views.
+        // Sparse-left scans only A and then performs 8*128 = 1024 multiplies,
+        // which is cheaper under the current one-shot cost model:
+        //   sparse-left  = 128*128 + 8*128       = 17_408
+        //   sparse-sparse= 128*128 + 128*128 + 8 = 32_776
         let (_, stats) = adaptive_matmul(&a, &b, RectangularPolicy::Auto);
-        assert_eq!(stats.kernel, Some(RectangularKernel::SparseSparse));
+        assert_eq!(stats.kernel, Some(RectangularKernel::SparseLeft));
         assert_eq!(stats.sparse_candidate_products, 8);
-        assert_eq!(stats.scalar_multiplications, 8);
+        assert_eq!(stats.scalar_multiplications, 8 * 128);
+        assert_eq!(stats.sparse_left_estimated_cost, 17_408);
+        assert_eq!(stats.sparse_sparse_estimated_cost, 32_776);
+        assert!(stats.sparse_left_estimated_cost < stats.sparse_sparse_estimated_cost);
+
+        // The forced sparse×sparse kernel is still exact and still performs the
+        // minimum 8 scalar products; it just is not the cheapest one-shot path
+        // after sparse-view construction is included.
+        let (_, forced) = adaptive_matmul(&a, &b, RectangularPolicy::SparseSparse);
+        assert_eq!(forced.scalar_multiplications, 8);
     }
 
     #[test]

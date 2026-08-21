@@ -45,6 +45,35 @@ impl Default for SignatureConfig {
     }
 }
 
+/// Practical moment/IBLT-style sparse-recovery configuration.
+///
+/// Each bucket uses three algebraic measurements instead of a binary
+/// index-signature block: S0=sum(x_i), S1=sum((i+1)x_i), and
+/// S2=sum((i+1)^2 x_i). Singleton buckets therefore reveal both the index and
+/// value, while the quadratic moment rejects most collisions. This backend is
+/// intentionally an engineering backend over exact i64 arithmetic, not the
+/// arbitrary-ring recovery pair from the theorem.
+#[derive(Clone, Debug)]
+pub struct MomentConfig {
+    pub degree: usize,
+    pub oversampling: f64,
+    pub seed: u64,
+    pub identity_fallback: bool,
+    pub guaranteed_correction: bool,
+}
+
+impl Default for MomentConfig {
+    fn default() -> Self {
+        Self {
+            degree: 3,
+            oversampling: 3.0,
+            seed: 0x4D4F_4D45_4E54_0001,
+            identity_fallback: true,
+            guaranteed_correction: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum RecoveryBackend {
     /// Exact recovery using identity matrices. This follows Algorithm 1
@@ -52,6 +81,8 @@ pub enum RecoveryBackend {
     Identity,
     /// Practical A \otimes_r B signature recovery with deterministic hashing.
     Signature(SignatureConfig),
+    /// Practical three-moment / IBLT-style peeling recovery.
+    Moment(MomentConfig),
     /// Proof-oriented A \otimes_r B recovery using the explicit
     /// Guruswami-Umans-Vadhan / Parvaresh-Vardy unbalanced expander.
     Guv(GuvConfig),
@@ -61,6 +92,7 @@ pub enum RecoveryBackend {
 pub enum BinaryRecoveryMatrix {
     Identity { domain: usize },
     Signature(SignatureRecovery),
+    Moment(MomentRecovery),
     Guv(GuvRecovery),
 }
 
@@ -68,6 +100,13 @@ pub enum BinaryRecoveryMatrix {
 enum RecoveryMatrixKey {
     Identity { domain: usize },
     Signature {
+        domain: usize,
+        capacity: usize,
+        degree: usize,
+        oversampling_bits: u64,
+        seed: u64,
+    },
+    Moment {
         domain: usize,
         capacity: usize,
         degree: usize,
@@ -88,7 +127,7 @@ impl RecoveryMatrixKey {
         // Signature matrices are deliberately reseeded every round. A signature
         // request that falls back to identity receives an Identity key and is
         // therefore cacheable.
-        !matches!(self, Self::Signature { .. })
+        !matches!(self, Self::Signature { .. } | Self::Moment { .. })
     }
 }
 
@@ -120,6 +159,7 @@ impl BinaryRecoveryMatrix {
         match self {
             Self::Identity { domain } => *domain,
             Self::Signature(s) => s.domain,
+            Self::Moment(m) => m.domain,
             Self::Guv(g) => g.domain,
         }
     }
@@ -128,6 +168,7 @@ impl BinaryRecoveryMatrix {
         match self {
             Self::Identity { domain } => *domain,
             Self::Signature(s) => s.rows(),
+            Self::Moment(m) => m.rows(),
             Self::Guv(g) => g.rows(),
         }
     }
@@ -136,6 +177,7 @@ impl BinaryRecoveryMatrix {
         match self {
             Self::Identity { .. } => "identity",
             Self::Signature(_) => "signature-hash",
+            Self::Moment(_) => "moment-hash",
             Self::Guv(_) => "guv-expander",
         }
     }
@@ -152,7 +194,22 @@ impl BinaryRecoveryMatrix {
         match self {
             Self::Identity { .. } => vec![index],
             Self::Signature(s) => s.rows_for_index(index),
+            Self::Moment(m) => m.rows_for_index(index),
             Self::Guv(g) => g.rows_for_index(index),
+        }
+    }
+
+    /// Enumerate nonzero measurement coefficients in one logical column.
+    /// Binary backends return coefficient 1; the moment backend returns the
+    /// three moment coefficients for every bucket neighbor.
+    #[inline]
+    pub fn weighted_rows_for_index(&self, index: usize) -> Vec<(usize, i64)> {
+        assert!(index < self.domain());
+        match self {
+            Self::Identity { .. } => vec![(index, 1)],
+            Self::Signature(s) => s.rows_for_index(index).into_iter().map(|r| (r, 1)).collect(),
+            Self::Moment(m) => m.weighted_rows_for_index(index),
+            Self::Guv(g) => g.rows_for_index(index).into_iter().map(|r| (r, 1)).collect(),
         }
     }
 }
@@ -208,19 +265,7 @@ impl SignatureRecovery {
     #[inline]
     pub fn neighbors(&self, index: usize) -> Vec<usize> {
         assert!(index < self.domain);
-        let mut out = Vec::with_capacity(self.degree);
-        let mut attempt = 0u64;
-        while out.len() < self.degree {
-            let key = self.seed
-                ^ (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                ^ attempt.wrapping_mul(0xD1B5_4A32_D192_ED03);
-            let b = (splitmix64(key) % self.bucket_count as u64) as usize;
-            if !out.contains(&b) {
-                out.push(b);
-            }
-            attempt = attempt.wrapping_add(1);
-        }
-        out
+        hashed_neighbors(self.seed, self.bucket_count, self.degree, index)
     }
 
     #[inline]
@@ -235,6 +280,72 @@ impl SignatureRecovery {
                     out.push(base + bit);
                 }
             }
+        }
+        out
+    }
+}
+
+/// Three-moment left-regular recovery matrix. Each bucket owns rows
+/// [3b, 3b+1, 3b+2] with coefficients 1, code, code^2, where code=index+1.
+#[derive(Clone, Debug)]
+pub struct MomentRecovery {
+    pub domain: usize,
+    pub capacity: usize,
+    pub bucket_count: usize,
+    pub degree: usize,
+    pub seed: u64,
+}
+
+impl MomentRecovery {
+    pub fn new(
+        domain: usize,
+        capacity: usize,
+        degree: usize,
+        oversampling: f64,
+        seed: u64,
+    ) -> Self {
+        assert!(domain > 0);
+        assert!(capacity > 0 && capacity <= domain);
+        assert!(degree > 0);
+        assert!(oversampling.is_finite() && oversampling > 0.0);
+        let bucket_count = (((capacity as f64) * oversampling).ceil() as usize)
+            .max(degree)
+            .min(domain.max(1));
+        let degree = degree.min(bucket_count);
+        Self { domain, capacity, bucket_count, degree, seed }
+    }
+
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.bucket_count.saturating_mul(3)
+    }
+
+    #[inline]
+    pub fn neighbors(&self, index: usize) -> Vec<usize> {
+        assert!(index < self.domain);
+        hashed_neighbors(self.seed, self.bucket_count, self.degree, index)
+    }
+
+    #[inline]
+    pub fn rows_for_index(&self, index: usize) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.degree * 3);
+        for bucket in self.neighbors(index) {
+            let base = bucket * 3;
+            out.extend_from_slice(&[base, base + 1, base + 2]);
+        }
+        out
+    }
+
+    #[inline]
+    pub fn weighted_rows_for_index(&self, index: usize) -> Vec<(usize, i64)> {
+        let code = (index + 1) as i64;
+        let code2 = code.saturating_mul(code);
+        let mut out = Vec::with_capacity(self.degree * 3);
+        for bucket in self.neighbors(index) {
+            let base = bucket * 3;
+            out.push((base, 1));
+            out.push((base + 1, code));
+            out.push((base + 2, code2));
         }
         out
     }
@@ -273,12 +384,39 @@ impl ExpanderSignature for GuvRecovery {
     fn rows(&self) -> usize { GuvRecovery::rows(self) }
 }
 
+#[derive(Clone, Debug)]
+pub struct NestedOptions {
+    pub rectangular_policy: RectangularPolicy,
+    /// Engineering scheduler: after an identity outer measurement exposes the
+    /// number of live residual columns, skip q-levels below the next power of
+    /// two of K_remaining / live_columns.
+    pub practical_scheduler: bool,
+    /// Engineering support mask: after identity outer recovery exposes concrete
+    /// column ids, restrict later B/G work to those observed residual columns.
+    pub masked_residual: bool,
+    /// Marks k_bound as the exact nnz(C), rather than merely an upper bound.
+    /// Used only for practical support-completeness checks/safety fallback.
+    pub exact_k_bound: bool,
+}
+
+impl Default for NestedOptions {
+    fn default() -> Self {
+        Self {
+            rectangular_policy: RectangularPolicy::Auto,
+            practical_scheduler: false,
+            masked_residual: false,
+            exact_k_bound: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct NestedSpGemmStats {
     pub rounds: Vec<NestedRoundStats>,
     pub correction_pass: Option<CorrectionPassStats>,
     pub terminated_early: bool,
     pub termination_reason: Option<String>,
+    pub scheduler_skipped_rounds: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -306,6 +444,9 @@ pub struct NestedRoundStats {
     pub bgt_cache_hit: bool,
     pub product_cache_hit: bool,
     pub residual_cache_hit: bool,
+    pub masked_residual: bool,
+    pub active_mask_columns: usize,
+    pub scheduler_target_q: usize,
     pub residual_measure_time: Duration,
     pub decode_time: Duration,
 }
@@ -333,18 +474,39 @@ pub fn nested_spgemm(
     k_bound: usize,
     backend: RecoveryBackend,
 ) -> (CsrMatrix, NestedSpGemmStats) {
-    nested_spgemm_with_policy(a, b, k_bound, backend, RectangularPolicy::Auto)
+    nested_spgemm_with_options(a, b, k_bound, backend, NestedOptions::default())
 }
 
-/// Variant of `nested_spgemm` with an explicit compressed rectangular-kernel
-/// policy. `Auto` estimates dense, one-sided sparse, and sparse×sparse work on
-/// each Graia round and selects the cheapest traversal.
+/// Backward-compatible v0.5 entry point with only a rectangular-kernel policy.
 pub fn nested_spgemm_with_policy(
     a: &CsrMatrix,
     b: &CsrMatrix,
     k_bound: usize,
     backend: RecoveryBackend,
     rectangular_policy: RectangularPolicy,
+) -> (CsrMatrix, NestedSpGemmStats) {
+    nested_spgemm_with_options(
+        a,
+        b,
+        k_bound,
+        backend,
+        NestedOptions {
+            rectangular_policy,
+            ..NestedOptions::default()
+        },
+    )
+}
+
+/// v0.6 engineering entry point. The theorem-pure behavior is obtained with
+/// `NestedOptions::default()`. Practical scheduling and support masking are
+/// explicitly opt-in at the library level; the benchmark CLI enables them by
+/// default so their effect is visible.
+pub fn nested_spgemm_with_options(
+    a: &CsrMatrix,
+    b: &CsrMatrix,
+    k_bound: usize,
+    backend: RecoveryBackend,
+    options: NestedOptions,
 ) -> (CsrMatrix, NestedSpGemmStats) {
     assert_eq!(a.cols, b.rows, "incompatible matrix dimensions");
     let r = a.rows;
@@ -359,18 +521,30 @@ pub fn nested_spgemm_with_policy(
     let mut d = SparseColumns::zeros(r, c);
     let mut d_version = 0u64;
     let mut stats = NestedSpGemmStats::default();
+    let mut support_mask: Option<Vec<bool>> = None;
+    let mut scheduler_target_q = 0usize;
 
-    // v0.5 cache hierarchy:
+    // v0.6 cache hierarchy:
     //   recovery matrix -> H*A / B*G^T -> H*A*B*G^T -> residual W for one D version.
-    // Signature matrices are intentionally reseeded per round and therefore do
-    // not populate these caches unless they fall back to identity.
+    // Round-reseeded Signature/Moment matrices are not cached, while identity/GUV
+    // factors and products are reused. A support-masked B factor is deliberately
+    // round-local because the mask changes as columns are recovered.
     let mut recovery_matrix_cache: HashMap<RecoveryMatrixKey, BinaryRecoveryMatrix> = HashMap::new();
     let mut left_factor_cache: HashMap<RecoveryMatrixKey, Arc<DenseMatrix>> = HashMap::new();
     let mut right_factor_cache: HashMap<RecoveryMatrixKey, Arc<DenseMatrix>> = HashMap::new();
     let mut product_cache: HashMap<(RecoveryMatrixKey, RecoveryMatrixKey), CachedProduct> = HashMap::new();
     let mut residual_cache: HashMap<ResidualCacheKey, CachedResidual> = HashMap::new();
 
-    for params in schedule {
+    let mut schedule_pos = 0usize;
+    while schedule_pos < schedule.len() {
+        let params = schedule[schedule_pos].clone();
+        schedule_pos += 1;
+
+        if options.practical_scheduler && scheduler_target_q > 0 && params.q < scheduler_target_q {
+            stats.scheduler_skipped_rounds += 1;
+            continue;
+        }
+
         let (h, h_matrix_cache_hit, h_key) = build_recovery_matrix_cached(
             &mut recovery_matrix_cache,
             r,
@@ -388,24 +562,61 @@ pub fn nested_spgemm_with_policy(
             params.i,
         );
 
+        let active_mask = if options.masked_residual && g.is_identity() {
+            support_mask.as_ref().filter(|m| m.iter().any(|&x| x))
+        } else {
+            None
+        };
+        let masked_residual = active_mask.is_some();
+        let active_mask_columns = active_mask
+            .map(|m| m.iter().filter(|&&x| x).count())
+            .unwrap_or(c);
+
         let pair_key = (h_key.clone(), g_key.clone());
         let residual_key = ResidualCacheKey {
             h: h_key.clone(),
             g: g_key.clone(),
             d_version,
         };
-        let cache_pair = h_key.cacheable() && g_key.cacheable();
+        let cache_pair = !masked_residual && h_key.cacheable() && g_key.cacheable();
 
         let mut left_time = Duration::default();
         let mut right_time = Duration::default();
         let mut rectangular_time = Duration::default();
         let mut residual_measure_time = Duration::default();
-        let mut ha_cache_hit = false;
-        let mut bgt_cache_hit = false;
         let mut product_cache_hit = false;
         let mut residual_cache_hit = false;
 
-        let (w, rectangular_stats) = if cache_pair {
+        // Option rather than a dummy false assignment avoids the v0.5 compiler
+        // warnings about values that were always overwritten before being read.
+        let ha_cache_hit: bool;
+        let bgt_cache_hit: bool;
+
+        let (w, rectangular_stats) = if masked_residual {
+            let (ha, hit, elapsed) = get_or_build_factor(
+                &mut left_factor_cache,
+                &h_key,
+                || left_recovery_sketch(a, &h),
+            );
+            ha_cache_hit = hit;
+            left_time = elapsed;
+
+            let start = Instant::now();
+            let bgt = right_recovery_sketch_masked(b, &g, active_mask.unwrap());
+            right_time = start.elapsed();
+            bgt_cache_hit = false;
+
+            let start = Instant::now();
+            let (hcgt, rect_stats) = adaptive_matmul(&ha, &bgt, options.rectangular_policy);
+            rectangular_time = start.elapsed();
+
+            let start = Instant::now();
+            let hdgt = d.two_sided_measure_masked(&h, &g, active_mask.unwrap());
+            let mut residual = hcgt;
+            sub_assign_dense(&mut residual, &hdgt);
+            residual_measure_time = start.elapsed();
+            (Arc::new(residual), rect_stats)
+        } else if cache_pair {
             if let Some(cached) = residual_cache.get(&residual_key) {
                 residual_cache_hit = true;
                 product_cache_hit = product_cache.contains_key(&pair_key);
@@ -436,7 +647,7 @@ pub fn nested_spgemm_with_policy(
                     right_time = elapsed;
 
                     let start = Instant::now();
-                    let (product, rect_stats) = adaptive_matmul(&ha, &bgt, rectangular_policy);
+                    let (product, rect_stats) = adaptive_matmul(&ha, &bgt, options.rectangular_policy);
                     rectangular_time = start.elapsed();
                     let product = Arc::new(product);
                     product_cache.insert(
@@ -465,9 +676,6 @@ pub fn nested_spgemm_with_policy(
                 (residual, rect_stats)
             }
         } else {
-            // The full pair is round-specific (normally because H or G is a
-            // reseeded signature matrix), but the *other* factor may still be
-            // deterministic/identity. Cache HA and BG^T independently.
             let (ha, hit, elapsed) = get_or_build_factor(
                 &mut left_factor_cache,
                 &h_key,
@@ -485,7 +693,7 @@ pub fn nested_spgemm_with_policy(
             right_time = elapsed;
 
             let start = Instant::now();
-            let (hcgt, rect_stats) = adaptive_matmul(&ha, &bgt, rectangular_policy);
+            let (hcgt, rect_stats) = adaptive_matmul(&ha, &bgt, options.rectangular_policy);
             rectangular_time = start.elapsed();
 
             let start = Instant::now();
@@ -501,9 +709,11 @@ pub fn nested_spgemm_with_policy(
             .expect("adaptive rectangular multiplication did not select a kernel");
         let w_nnz = w.nnz();
 
-        // If both measurements are identities, W is literally AB-D. A zero W
-        // is therefore a complete residual certificate, independent of q/p.
-        let certified_zero_residual = h.is_identity() && g.is_identity() && w_nnz == 0;
+        // A zero identity residual is global only when no support mask was used.
+        let certified_zero_residual = !masked_residual
+            && h.is_identity()
+            && g.is_identity()
+            && w_nnz == 0;
 
         let start = Instant::now();
         let outer = if certified_zero_residual {
@@ -512,31 +722,61 @@ pub fn nested_spgemm_with_policy(
             safe_decode_product(&g, w.as_ref(), params.p)
         };
         let outer_recovered = outer.len();
+
+        // Identity G exposes concrete output-column ids. Use the first such
+        // observation as a practical superset mask; subsequent rounds only
+        // remove columns that have been accepted by the inner decoder.
+        if options.masked_residual && g.is_identity() && support_mask.is_none() && !outer.is_empty() {
+            let mut mask = vec![false; c];
+            for (j, _) in &outer {
+                mask[*j] = true;
+            }
+            support_mask = Some(mask);
+        }
+
         let mut inner_updates = 0usize;
         let mut round_changed_d = false;
+        let allow_mask_removal = h.is_identity() || matches!(&h, BinaryRecoveryMatrix::Moment(_));
 
         for (j, xi) in outer {
             let z = safe_decode_scalar(&h, &xi, params.q);
             if !z.is_empty() {
                 round_changed_d |= d.add_to_column(j, &z);
                 inner_updates += 1;
+                if options.masked_residual && allow_mask_removal {
+                    if let Some(mask) = support_mask.as_mut() {
+                        mask[j] = false;
+                    }
+                }
             }
         }
         if round_changed_d {
             d_version = d_version.wrapping_add(1);
-            // D versions are monotonic; measurements of an older residual can
-            // never become valid again. Keep factor/product caches, but release
-            // stale W matrices promptly.
             residual_cache.clear();
         }
         let decode_time = start.elapsed();
 
-        // With identity measurements, outer decoding either returns *all*
-        // nonzero residual columns (when their count <= p) or returns nothing.
-        // Likewise, each successful inner decode is the entire residual column.
-        // Therefore if every outer column was updated, D has just received the
-        // complete residual even when q<r or p<c.
-        let complete_identity_recovery = h.is_identity()
+        let remaining_mask_columns = support_mask
+            .as_ref()
+            .map(|m| m.iter().filter(|&&x| x).count())
+            .unwrap_or(0);
+
+        // Practical q jump: if identity G showed m live columns, an exact-K
+        // benchmark implies average remaining column sparsity K_remaining/m.
+        // Jump to the next power of two rather than spending a round below that.
+        if options.practical_scheduler && g.is_identity() {
+            let observed = remaining_mask_columns.max(if support_mask.is_none() { outer_recovered } else { 0 });
+            if observed > 0 {
+                let remaining_bound = k.saturating_sub(d.nnz()).max(1);
+                let avg = remaining_bound.saturating_add(observed - 1) / observed;
+                let target = avg.max(1).next_power_of_two().min(r.max(1));
+                scheduler_target_q = scheduler_target_q.max(target);
+            }
+        }
+
+        // Full identity measurements are globally complete only without a mask.
+        let complete_identity_recovery = !masked_residual
+            && h.is_identity()
             && g.is_identity()
             && outer_recovered > 0
             && inner_updates == outer_recovered;
@@ -571,6 +811,9 @@ pub fn nested_spgemm_with_policy(
             bgt_cache_hit,
             product_cache_hit,
             residual_cache_hit,
+            masked_residual,
+            active_mask_columns,
+            scheduler_target_q,
             residual_measure_time,
             decode_time,
         });
@@ -584,9 +827,6 @@ pub fn nested_spgemm_with_policy(
             break;
         }
 
-        // Identity measurements expose the whole residual. If every nonzero
-        // residual column decoded successfully, the update is complete and no
-        // zero-verification round is needed.
         if complete_identity_recovery {
             stats.terminated_early = true;
             stats.termination_reason = Some(format!(
@@ -595,20 +835,44 @@ pub fn nested_spgemm_with_policy(
             ));
             break;
         }
+
+        // In exact-K benchmark mode, exhausting the observed support with exactly
+        // K verified/accepted nonzeros is a useful practical stop condition.
+        if options.exact_k_bound
+            && options.masked_residual
+            && support_mask.as_ref().map(|m| !m.iter().any(|&x| x)).unwrap_or(false)
+            && d.nnz() == k
+        {
+            stats.terminated_early = true;
+            stats.termination_reason = Some(format!(
+                "observed residual support exhausted at exact K in round {}",
+                params.i
+            ));
+            break;
+        }
+
+        // If the observed mask was exhausted but K says entries remain, discard
+        // the mask so a later full round can discover omitted support.
+        if options.exact_k_bound
+            && support_mask.as_ref().map(|m| !m.iter().any(|&x| x)).unwrap_or(false)
+            && d.nnz() < k
+        {
+            support_mask = None;
+        }
     }
 
     let guaranteed_correction = match &backend {
         RecoveryBackend::Identity => false,
         RecoveryBackend::Signature(cfg) => cfg.guaranteed_correction,
+        RecoveryBackend::Moment(cfg) => cfg.guaranteed_correction,
         RecoveryBackend::Guv(cfg) => cfg.guaranteed_correction,
     };
-    if guaranteed_correction {
+    let exact_k_safety = options.masked_residual && options.exact_k_bound && d.nnz() != k;
+    if guaranteed_correction || exact_k_safety {
         let start = Instant::now();
         let h = BinaryRecoveryMatrix::identity(r);
         let g = BinaryRecoveryMatrix::identity(c);
 
-        // I_r * (AB-D) * I_c^T. This is deliberately a correctness fallback,
-        // not part of the compressed benchmark path.
         let ha = left_recovery_sketch(a, &h);
         let bgt = right_recovery_sketch(b, &g);
         let mut residual = dense_matmul(&ha, &bgt);
@@ -723,6 +987,25 @@ fn recovery_matrix_key_hint(
                 }
             }
         }
+        RecoveryBackend::Moment(cfg) => {
+            let seed = cfg.seed
+                ^ salt
+                ^ (round as u64).wrapping_mul(0xA076_1D64_78BD_642F);
+            let moment = MomentRecovery::new(
+                domain, capacity, cfg.degree, cfg.oversampling, seed,
+            );
+            if cfg.identity_fallback && moment.rows() >= domain {
+                RecoveryMatrixKey::Identity { domain }
+            } else {
+                RecoveryMatrixKey::Moment {
+                    domain,
+                    capacity,
+                    degree: cfg.degree,
+                    oversampling_bits: cfg.oversampling.to_bits(),
+                    seed,
+                }
+            }
+        }
         RecoveryBackend::Guv(cfg) => {
             if capacity == 1 {
                 return RecoveryMatrixKey::Identity { domain };
@@ -788,6 +1071,31 @@ fn build_recovery_matrix(
                 )
             }
         }
+        RecoveryBackend::Moment(cfg) => {
+            let seed = cfg.seed
+                ^ salt
+                ^ (round as u64).wrapping_mul(0xA076_1D64_78BD_642F);
+            let moment = MomentRecovery::new(
+                domain, capacity, cfg.degree, cfg.oversampling, seed,
+            );
+            if cfg.identity_fallback && moment.rows() >= domain {
+                (
+                    BinaryRecoveryMatrix::identity(domain),
+                    RecoveryMatrixKey::Identity { domain },
+                )
+            } else {
+                (
+                    BinaryRecoveryMatrix::Moment(moment),
+                    RecoveryMatrixKey::Moment {
+                        domain,
+                        capacity,
+                        degree: cfg.degree,
+                        oversampling_bits: cfg.oversampling.to_bits(),
+                        seed,
+                    },
+                )
+            }
+        }
         RecoveryBackend::Guv(cfg) => {
             if capacity == 1 {
                 return (
@@ -837,13 +1145,13 @@ pub fn left_recovery_sketch(a: &CsrMatrix, h: &BinaryRecoveryMatrix) -> DenseMat
     }
 
     let mut out = DenseMatrix::zeros(h.rows(), a.cols);
-    let rows_by_index: Vec<Vec<usize>> =
-        (0..h.domain()).map(|i| h.rows_for_index(i)).collect();
+    let rows_by_index: Vec<Vec<(usize, i64)>> =
+        (0..h.domain()).map(|i| h.weighted_rows_for_index(i)).collect();
     for i in 0..a.rows {
         let measurement_rows = &rows_by_index[i];
         for (k, value) in a.row(i) {
-            for &mr in measurement_rows {
-                out[(mr, k)] += value;
+            for &(mr, coeff) in measurement_rows {
+                out[(mr, k)] += coeff * value;
             }
         }
     }
@@ -861,12 +1169,50 @@ pub fn right_recovery_sketch(b: &CsrMatrix, g: &BinaryRecoveryMatrix) -> DenseMa
     // Cache the column mapping once. In CSR traversal the same output column j
     // can occur in many B rows, so recomputing rows_for_index(j) inside the nnz
     // loop caused a large amount of hashing/allocation work in v0.4.
-    let rows_by_column: Vec<Vec<usize>> =
-        (0..g.domain()).map(|j| g.rows_for_index(j)).collect();
+    let rows_by_column: Vec<Vec<(usize, i64)>> =
+        (0..g.domain()).map(|j| g.weighted_rows_for_index(j)).collect();
     for k in 0..b.rows {
         for (j, value) in b.row(k) {
-            for &mr in &rows_by_column[j] {
-                out[(k, mr)] += value;
+            for &(mr, coeff) in &rows_by_column[j] {
+                out[(k, mr)] += value * coeff;
+            }
+        }
+    }
+    out
+}
+
+/// Compute B*G^T while ignoring output columns not present in `mask`.
+/// This is the v0.6 practical support-restricted multiplication path.
+pub fn right_recovery_sketch_masked(
+    b: &CsrMatrix,
+    g: &BinaryRecoveryMatrix,
+    mask: &[bool],
+) -> DenseMatrix {
+    assert_eq!(g.domain(), b.cols);
+    assert_eq!(mask.len(), b.cols);
+    if g.is_identity() {
+        let mut out = DenseMatrix::zeros(b.rows, b.cols);
+        for k in 0..b.rows {
+            for (j, value) in b.row(k) {
+                if mask[j] {
+                    out[(k, j)] = value;
+                }
+            }
+        }
+        return out;
+    }
+
+    let mut out = DenseMatrix::zeros(b.rows, g.rows());
+    let rows_by_column: Vec<Vec<(usize, i64)>> = (0..g.domain())
+        .map(|j| g.weighted_rows_for_index(j))
+        .collect();
+    for k in 0..b.rows {
+        for (j, value) in b.row(k) {
+            if !mask[j] {
+                continue;
+            }
+            for &(mr, coeff) in &rows_by_column[j] {
+                out[(k, mr)] += value * coeff;
             }
         }
     }
@@ -897,6 +1243,9 @@ pub fn safe_decode_scalar(
         }
         BinaryRecoveryMatrix::Signature(sig) => {
             expander_safe_decode_scalar(sig, measurement, capacity)
+        }
+        BinaryRecoveryMatrix::Moment(moment) => {
+            moment_safe_decode_scalar(moment, measurement, capacity)
         }
         BinaryRecoveryMatrix::Guv(guv) => {
             expander_safe_decode_scalar(guv, measurement, capacity)
@@ -931,10 +1280,235 @@ pub fn safe_decode_product(
         BinaryRecoveryMatrix::Signature(sig) => {
             expander_safe_decode_product(sig, measurement, capacity)
         }
+        BinaryRecoveryMatrix::Moment(moment) => {
+            moment_safe_decode_product(moment, measurement, capacity)
+        }
         BinaryRecoveryMatrix::Guv(guv) => {
             expander_safe_decode_product(guv, measurement, capacity)
         }
     }
+}
+
+fn moment_safe_decode_scalar(
+    moment: &MomentRecovery,
+    measurement: &[i64],
+    capacity: usize,
+) -> Vec<(usize, i64)> {
+    let original = measurement.to_vec();
+    let mut residual = original.clone();
+    let mut total: BTreeMap<usize, i64> = BTreeMap::new();
+
+    for _ in 0..capacity.max(1) {
+        let proposal = moment_reduce_scalar(moment, &residual);
+        if proposal.is_empty() {
+            break;
+        }
+        if total.len().saturating_add(proposal.len()) > capacity {
+            return Vec::new();
+        }
+        for &(idx, value) in &proposal {
+            add_scalar_entry(&mut total, idx, value);
+        }
+        let measured = measure_scalar_moment(moment, &proposal);
+        for (x, y) in residual.iter_mut().zip(measured) {
+            *x -= y;
+        }
+    }
+
+    let out: Vec<(usize, i64)> = total.into_iter().filter(|&(_, v)| v != 0).collect();
+    if out.len() > capacity || measure_scalar_moment(moment, &out) != original {
+        return Vec::new();
+    }
+    out
+}
+
+fn moment_reduce_scalar(moment: &MomentRecovery, measurement: &[i64]) -> Vec<(usize, i64)> {
+    let mut candidates: BTreeMap<usize, Option<i64>> = BTreeMap::new();
+    for bucket in 0..moment.bucket_count {
+        let base = bucket * 3;
+        let s0 = measurement[base];
+        let s1 = measurement[base + 1];
+        let s2 = measurement[base + 2];
+        let Some((idx, value)) = moment_singleton_scalar(moment, bucket, s0, s1, s2) else {
+            continue;
+        };
+        match candidates.entry(idx) {
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(Some(value));
+            }
+            std::collections::btree_map::Entry::Occupied(mut e) => {
+                let conflict = match e.get().as_ref() {
+                    Some(existing) => *existing != value,
+                    None => false,
+                };
+                if conflict {
+                    e.insert(None);
+                }
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .filter_map(|(idx, value)| value.map(|v| (idx, v)))
+        .collect()
+}
+
+fn moment_singleton_scalar(
+    moment: &MomentRecovery,
+    bucket: usize,
+    s0: i64,
+    s1: i64,
+    s2: i64,
+) -> Option<(usize, i64)> {
+    if s0 == 0 || s1 % s0 != 0 {
+        return None;
+    }
+    let code = s1 / s0;
+    if code <= 0 || code as usize > moment.domain {
+        return None;
+    }
+    if s2 != code * code * s0 {
+        return None;
+    }
+    let idx = code as usize - 1;
+    moment.neighbors(idx).contains(&bucket).then_some((idx, s0))
+}
+
+fn measure_scalar_moment(moment: &MomentRecovery, entries: &[(usize, i64)]) -> Vec<i64> {
+    let mut out = vec![0i64; moment.rows()];
+    for &(idx, value) in entries {
+        for (row, coeff) in moment.weighted_rows_for_index(idx) {
+            out[row] += coeff * value;
+        }
+    }
+    out
+}
+
+fn moment_safe_decode_product(
+    moment: &MomentRecovery,
+    measurement: &DenseMatrix,
+    capacity: usize,
+) -> Vec<(usize, Vec<i64>)> {
+    let original = measurement.clone();
+    let mut residual = measurement.clone();
+    let mut total: BTreeMap<usize, Vec<i64>> = BTreeMap::new();
+
+    for _ in 0..capacity.max(1) {
+        let proposal = moment_reduce_product(moment, &residual);
+        if proposal.is_empty() {
+            break;
+        }
+        if total.len().saturating_add(proposal.len()) > capacity {
+            return Vec::new();
+        }
+        for (idx, value) in &proposal {
+            add_product_entry(&mut total, *idx, value);
+        }
+        let measured = measure_product_moment(moment, residual.rows, &proposal);
+        sub_assign_dense(&mut residual, &measured);
+    }
+
+    let out: Vec<(usize, Vec<i64>)> = total
+        .into_iter()
+        .filter(|(_, v)| !is_zero_vec(v))
+        .collect();
+    if out.len() > capacity || measure_product_moment(moment, original.rows, &out) != original {
+        return Vec::new();
+    }
+    out
+}
+
+fn moment_reduce_product(
+    moment: &MomentRecovery,
+    measurement: &DenseMatrix,
+) -> Vec<(usize, Vec<i64>)> {
+    let mut candidates: BTreeMap<usize, Option<Vec<i64>>> = BTreeMap::new();
+    for bucket in 0..moment.bucket_count {
+        let base = bucket * 3;
+        let s0 = dense_col(measurement, base);
+        let s1 = dense_col(measurement, base + 1);
+        let s2 = dense_col(measurement, base + 2);
+        let Some((idx, value)) = moment_singleton_product(moment, bucket, &s0, &s1, &s2) else {
+            continue;
+        };
+        match candidates.entry(idx) {
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(Some(value));
+            }
+            std::collections::btree_map::Entry::Occupied(mut e) => {
+                let conflict = match e.get().as_ref() {
+                    Some(existing) => existing.as_slice() != value.as_slice(),
+                    None => false,
+                };
+                if conflict {
+                    e.insert(None);
+                }
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .filter_map(|(idx, value)| value.map(|v| (idx, v)))
+        .collect()
+}
+
+fn moment_singleton_product(
+    moment: &MomentRecovery,
+    bucket: usize,
+    s0: &[i64],
+    s1: &[i64],
+    s2: &[i64],
+) -> Option<(usize, Vec<i64>)> {
+    let mut code: Option<i64> = None;
+    for r in 0..s0.len() {
+        if s0[r] == 0 {
+            if s1[r] != 0 || s2[r] != 0 {
+                return None;
+            }
+            continue;
+        }
+        if s1[r] % s0[r] != 0 {
+            return None;
+        }
+        let c = s1[r] / s0[r];
+        match code {
+            None => code = Some(c),
+            Some(prev) if prev == c => {}
+            Some(_) => return None,
+        }
+    }
+    let code = code?;
+    if code <= 0 || code as usize > moment.domain {
+        return None;
+    }
+    let code2 = code * code;
+    for r in 0..s0.len() {
+        if s1[r] != code * s0[r] || s2[r] != code2 * s0[r] {
+            return None;
+        }
+    }
+    let idx = code as usize - 1;
+    moment
+        .neighbors(idx)
+        .contains(&bucket)
+        .then_some((idx, s0.to_vec()))
+}
+
+fn measure_product_moment(
+    moment: &MomentRecovery,
+    value_dim: usize,
+    entries: &[(usize, Vec<i64>)],
+) -> DenseMatrix {
+    let mut out = DenseMatrix::zeros(value_dim, moment.rows());
+    for (idx, value) in entries {
+        assert_eq!(value.len(), value_dim);
+        for (row, coeff) in moment.weighted_rows_for_index(*idx) {
+            for i in 0..value_dim {
+                out[(i, row)] += coeff * value[i];
+            }
+        }
+    }
+    out
 }
 
 fn expander_safe_decode_scalar<E: ExpanderSignature>(
@@ -1294,12 +1868,39 @@ impl SparseColumns {
             if self.data[j].is_empty() {
                 continue;
             }
-            let grows = g.rows_for_index(j);
+            let grows = g.weighted_rows_for_index(j);
             for (&i, &value) in &self.data[j] {
-                let hrows = h.rows_for_index(i);
-                for &hr in &hrows {
-                    for &gr in &grows {
-                        out[(hr, gr)] += value;
+                let hrows = h.weighted_rows_for_index(i);
+                for &(hr, hc) in &hrows {
+                    for &(gr, gc) in &grows {
+                        out[(hr, gr)] += hc * value * gc;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn two_sided_measure_masked(
+        &self,
+        h: &BinaryRecoveryMatrix,
+        g: &BinaryRecoveryMatrix,
+        mask: &[bool],
+    ) -> DenseMatrix {
+        assert_eq!(mask.len(), self.cols);
+        assert_eq!(h.domain(), self.rows);
+        assert_eq!(g.domain(), self.cols);
+        let mut out = DenseMatrix::zeros(h.rows(), g.rows());
+        for j in 0..self.cols {
+            if !mask[j] || self.data[j].is_empty() {
+                continue;
+            }
+            let grows = g.weighted_rows_for_index(j);
+            for (&i, &value) in &self.data[j] {
+                let hrows = h.weighted_rows_for_index(i);
+                for &(hr, hc) in &hrows {
+                    for &(gr, gc) in &grows {
+                        out[(hr, gr)] += hc * value * gc;
                     }
                 }
             }
@@ -1318,6 +1919,22 @@ impl SparseColumns {
         }
         CsrMatrix::from_triplets(self.rows, self.cols, &triplets)
     }
+}
+
+fn hashed_neighbors(seed: u64, bucket_count: usize, degree: usize, index: usize) -> Vec<usize> {
+    let mut out = Vec::with_capacity(degree);
+    let mut attempt = 0u64;
+    while out.len() < degree {
+        let key = seed
+            ^ (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ attempt.wrapping_mul(0xD1B5_4A32_D192_ED03);
+        let b = (splitmix64(key) % bucket_count as u64) as usize;
+        if !out.contains(&b) {
+            out.push(b);
+        }
+        attempt = attempt.wrapping_add(1);
+    }
+    out
 }
 
 #[inline]
@@ -1340,7 +1957,7 @@ fn ceil_log2(x: usize) -> usize {
 mod tests {
     use super::*;
     use crate::spgemm::spgemm_hash;
-    use crate::synthetic::overlap_problem;
+    use crate::synthetic::{overlap_problem, sparse_output_problem};
 
     #[test]
     fn signature_scalar_decoder_recovers_sparse_vector() {
@@ -1476,4 +2093,54 @@ mod tests {
         assert_eq!(actual, expected);
         assert!(stats.correction_pass.is_some());
     }
+    #[test]
+    fn moment_scalar_decoder_recovers_seven_sparse_vector() {
+        let moment = MomentRecovery::new(256, 8, 3, 3.0, 0x1234_5678);
+        assert_eq!(moment.rows(), 72);
+        let h = BinaryRecoveryMatrix::Moment(moment.clone());
+        let x = vec![(3, 5), (17, -2), (49, 7), (88, 11), (129, -3), (173, 4), (241, 9)];
+        let y = measure_scalar_moment(&moment, &x);
+        assert_eq!(safe_decode_scalar(&h, &y, 8), x);
+    }
+
+    #[test]
+    fn moment_product_decoder_recovers_sparse_direct_product_vector() {
+        let moment = MomentRecovery::new(64, 4, 3, 4.0, 0xBEEF);
+        let g = BinaryRecoveryMatrix::Moment(moment.clone());
+        let x = vec![
+            (5, vec![2, 0, -1]),
+            (19, vec![0, 7, 3]),
+            (42, vec![-4, 1, 0]),
+        ];
+        let y = measure_product_moment(&moment, 3, &x);
+        assert_eq!(safe_decode_product(&g, &y, 4), x);
+    }
+
+    #[test]
+    fn practical_scheduler_and_masked_moment_recover_sparse_output() {
+        let problem = sparse_output_problem(32, 64, 64, 16, 5, 0.75, 64);
+        let (expected, _) = spgemm_hash(&problem.a, &problem.b);
+        let cfg = MomentConfig {
+            degree: 3,
+            oversampling: 3.0,
+            seed: 0x4D4F_4D45_4E54_0001,
+            identity_fallback: true,
+            guaranteed_correction: false,
+        };
+        let (actual, stats) = nested_spgemm_with_options(
+            &problem.a,
+            &problem.b,
+            expected.nnz(),
+            RecoveryBackend::Moment(cfg),
+            NestedOptions {
+                rectangular_policy: RectangularPolicy::Auto,
+                practical_scheduler: true,
+                masked_residual: true,
+                exact_k_bound: true,
+            },
+        );
+        assert_eq!(actual, expected);
+        assert!(stats.scheduler_skipped_rounds > 0 || stats.rounds.iter().any(|r| r.masked_residual));
+    }
+
 }

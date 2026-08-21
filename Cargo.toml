@@ -1,8 +1,8 @@
 [package]
 name = "sketch-spgemm"
-version = "0.5.0"
+version = "0.6.1"
 edition = "2021"
-description = "Cached deterministic nested sparse-recovery SpGEMM with adaptive rectangular kernels"
+description = "Practical nested sparse-recovery SpGEMM with moment peeling, support masking, and adaptive scheduling"
 license = "MIT OR Apache-2.0"
 
 [profile.release]

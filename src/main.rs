@@ -1,7 +1,7 @@
 use sketch_spgemm::{
-    adaptive_matmul, direct_two_sided_sketch, left_sketch, nested_spgemm_with_policy,
+    adaptive_matmul, direct_two_sided_sketch, left_sketch, nested_spgemm_with_options,
     overlap_problem, paper_schedule, right_sketch, sparse_output_problem, spgemm_hash, GuvConfig,
-    CsrMatrix, RecoveryBackend, RectangularPolicy, SignatureConfig, SketchMap,
+    CsrMatrix, MomentConfig, NestedOptions, RecoveryBackend, RectangularPolicy, SignatureConfig, SketchMap,
 };
 use std::env;
 use std::time::{Duration, Instant};
@@ -28,6 +28,9 @@ struct Config {
     guv_epsilon: f64,
     identity_fallback: bool,
     guaranteed_correction: bool,
+    practical_scheduler: bool,
+    masked_residual: bool,
+    exact_k_bound: bool,
     rectangular_policy: RectangularPolicy,
 }
 
@@ -47,13 +50,16 @@ impl Default for Config {
             g_buckets: 64,
             degree: 3,
             repeats: 3,
-            nested_backend: "guv".to_string(),
-            recovery_degree: 5,
-            recovery_oversampling: 2.0,
+            nested_backend: "moment".to_string(),
+            recovery_degree: 3,
+            recovery_oversampling: 3.0,
             guv_alpha: 1.0,
             guv_epsilon: 1.0 / 12.0,
             identity_fallback: true,
             guaranteed_correction: false,
+            practical_scheduler: true,
+            masked_residual: true,
+            exact_k_bound: true,
             rectangular_policy: RectangularPolicy::Auto,
         }
     }
@@ -61,7 +67,7 @@ impl Default for Config {
 
 fn main() {
     let cfg = parse_args();
-    println!("SketchSpGEMM cached nested-recovery prototype v0.5");
+    println!("SketchSpGEMM practical nested-recovery prototype v0.6");
     println!("config: {cfg:?}\n");
 
     let problem = match cfg.synthetic.as_str() {
@@ -214,6 +220,13 @@ fn main() {
                 identity_fallback: cfg.identity_fallback,
                 guaranteed_correction: cfg.guaranteed_correction,
             }),
+            "moment" => RecoveryBackend::Moment(MomentConfig {
+                degree: cfg.recovery_degree,
+                oversampling: cfg.recovery_oversampling,
+                seed: 0x4D4F_4D45_4E54_0001,
+                identity_fallback: cfg.identity_fallback,
+                guaranteed_correction: cfg.guaranteed_correction,
+            }),
             "guv" => RecoveryBackend::Guv(GuvConfig {
                 alpha: cfg.guv_alpha,
                 epsilon: cfg.guv_epsilon,
@@ -224,12 +237,17 @@ fn main() {
         };
 
         let start = Instant::now();
-        let (recovered, nested_stats) = nested_spgemm_with_policy(
+        let (recovered, nested_stats) = nested_spgemm_with_options(
             &problem.a,
             &problem.b,
             c.nnz(),
             backend,
-            cfg.rectangular_policy,
+            NestedOptions {
+                rectangular_policy: cfg.rectangular_policy,
+                practical_scheduler: cfg.practical_scheduler,
+                masked_residual: cfg.masked_residual,
+                exact_k_bound: cfg.exact_k_bound,
+            },
         );
         let nested_t = start.elapsed();
         let exact = recovered == c;
@@ -265,11 +283,14 @@ fn main() {
                 s.w_nnz,
             );
             println!(
-                "       HA dens={:.3}, BGT dens={:.3}, sparse candidates={}, mults={}, matrix-cache(H/G)={}/{}, factor-cache(HA/BGT)={}/{}, HABG-cache={}, W-cache={}",
+                "       HA dens={:.3}, BGT dens={:.3}, sparse candidates={}, mults={}, mask={}/{} cols, sched-q={}, matrix-cache(H/G)={}/{}, factor-cache(HA/BGT)={}/{}, HABG-cache={}, W-cache={}",
                 s.ha_density,
                 s.bgt_density,
                 s.rectangular_candidate_products,
                 s.rectangular_scalar_multiplications,
+                if s.masked_residual { "on" } else { "off" },
+                s.active_mask_columns,
+                s.scheduler_target_q,
                 if s.h_matrix_cache_hit { "hit" } else { "miss" },
                 if s.g_matrix_cache_hit { "hit" } else { "miss" },
                 if s.ha_cache_hit { "hit" } else { "miss" },
@@ -277,6 +298,9 @@ fn main() {
                 if s.product_cache_hit { "hit" } else { "miss" },
                 if s.residual_cache_hit { "hit" } else { "miss" },
             );
+        }
+        if nested_stats.scheduler_skipped_rounds > 0 {
+            println!("  practical scheduler skipped {} paper round(s)", nested_stats.scheduler_skipped_rounds);
         }
         if nested_stats.terminated_early {
             println!(
@@ -301,12 +325,14 @@ fn main() {
     println!("\nScope note:");
     println!("  guv backend = explicit Parvaresh-Vardy/GUV neighbor construction +");
     println!("                Bennett A⊗_rB Reduce/Recovery decoder.");
-    println!("  signature backend = deterministic hash graph for practical comparison.");
+    println!("  signature backend = binary-index deterministic hash graph for practical comparison.");
+    println!("  moment backend = 3-row/bucket algebraic moment peeling over exact i64 arithmetic.");
     println!("  identity backend = exact Algorithm-1 recovery logic, no compression.");
     println!("  With --identity-fallback true, literal GUV constants often select I_N;");
     println!("  this is expected and follows the recovery theorem's smaller-row fallback.");
     println!("  --guaranteed-correction true adds a validation-only exact residual pass.");
-    println!("  v0.5 caches repeated HA, BG^T, HABG^T and W while D is unchanged.");
+    println!("  v0.6 adds support-masked residual multiplication and an observed-geometry q scheduler.");
+    println!("  v0.6 keeps v0.5 caches for repeated HA, BG^T, HABG^T and W.");
     println!("  --rect-kernel auto dispatches dense/sparse rectangular multiplication per round.");
 }
 
@@ -404,6 +430,9 @@ fn parse_args() -> Config {
             "--guv-epsilon" => cfg.guv_epsilon = value.parse().unwrap(),
             "--identity-fallback" => cfg.identity_fallback = parse_bool(&value),
             "--guaranteed-correction" => cfg.guaranteed_correction = parse_bool(&value),
+            "--practical-scheduler" => cfg.practical_scheduler = parse_bool(&value),
+            "--masked-residual" => cfg.masked_residual = parse_bool(&value),
+            "--exact-k-bound" => cfg.exact_k_bound = parse_bool(&value),
             "--rect-kernel" => cfg.rectangular_policy = value.parse().unwrap(),
             _ => panic!("unknown flag: {flag}"),
         }
@@ -434,12 +463,15 @@ fn print_help() {
     println!("  --g-buckets N               kernel-probe G rows (default 64)");
     println!("  --degree N                  kernel-probe sketch degree (default 3)");
     println!("  --repeats N                 timing repetitions (default 3)");
-    println!("  --nested-backend MODE       guv|signature|identity|off (default guv)");
-    println!("  --recovery-degree N         hash-signature degree (default 5)");
-    println!("  --recovery-oversampling X   hash buckets/capacity (default 2.0)");
+    println!("  --nested-backend MODE       guv|signature|moment|identity|off (default moment)");
+    println!("  --recovery-degree N         hash/moment degree (default 3)");
+    println!("  --recovery-oversampling X   hash/moment buckets/capacity (default 3.0)");
     println!("  --guv-alpha X               GUV alpha constant (default 1.0)");
     println!("  --guv-epsilon X             GUV expansion epsilon (default 1/12)");
     println!("  --identity-fallback BOOL    use I_N when smaller (default true)");
     println!("  --guaranteed-correction BOOL exact final residual pass (default false)");
+    println!("  --practical-scheduler BOOL  jump q from observed residual geometry (default true)");
+    println!("  --masked-residual BOOL      restrict later B work to observed live columns (default true)");
+    println!("  --exact-k-bound BOOL        treat benchmark K as exact nnz(C) (default true)");
     println!("  --rect-kernel MODE          auto|dense|sparse-left|sparse-right|sparse-sparse (default auto)");
 }

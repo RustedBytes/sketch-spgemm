@@ -9,8 +9,9 @@ pub mod synthetic;
 pub use guv::{GuvConfig, GuvError, GuvParameters, GuvRecovery};
 pub use matrix::{CsrMatrix, DenseMatrix};
 pub use recovery::{
-    left_recovery_sketch, nested_spgemm, nested_spgemm_with_policy, right_recovery_sketch,
-    safe_decode_product, safe_decode_scalar, BinaryRecoveryMatrix, CorrectionPassStats,
+    left_recovery_sketch, nested_spgemm, nested_spgemm_with_options, nested_spgemm_with_policy,
+    right_recovery_sketch, right_recovery_sketch_masked, safe_decode_product, safe_decode_scalar,
+    BinaryRecoveryMatrix, CorrectionPassStats, MomentConfig, MomentRecovery, NestedOptions,
     NestedRoundStats, NestedSpGemmStats, RecoveryBackend, SignatureConfig, SignatureRecovery,
 };
 pub use rect::{
