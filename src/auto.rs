@@ -101,7 +101,10 @@ pub fn auto_spgemm(
 
     if !estimate.choose_sketch || estimate.estimated_output_nnz == 0 {
         let (result, exact_stats, exact_method) = exact_dispatch(
-            a, b, config.rectangular_policy, config.exact_dense_cell_limit
+            a,
+            b,
+            config.rectangular_policy,
+            config.exact_dense_cell_limit,
         );
         return (
             result,
@@ -118,8 +121,8 @@ pub fn auto_spgemm(
     }
 
     let max_k = a.rows.saturating_mul(b.cols).max(1);
-    let k_bound = ((estimate.estimated_output_nnz as f64) * config.k_safety_factor.max(1.0))
-        .ceil() as usize;
+    let k_bound =
+        ((estimate.estimated_output_nnz as f64) * config.k_safety_factor.max(1.0)).ceil() as usize;
     let k_bound = k_bound.clamp(1, max_k);
 
     let mut moment = config.moment.clone();
@@ -158,7 +161,10 @@ pub fn auto_spgemm(
     if config.exact_fallback {
         let reason = Some("sketch execution ended without a residual certificate".to_string());
         let (result, exact_stats, exact_method) = exact_dispatch(
-            a, b, config.rectangular_policy, config.exact_dense_cell_limit
+            a,
+            b,
+            config.rectangular_policy,
+            config.exact_dense_cell_limit,
         );
         return (
             result,
@@ -183,12 +189,18 @@ pub fn auto_spgemm(
             nested: Some(nested_stats),
             exact_stats: None,
             exact_method: None,
-            fallback_reason: Some("returned uncertified sketch result because exact_fallback=false".to_string()),
+            fallback_reason: Some(
+                "returned uncertified sketch result because exact_fallback=false".to_string(),
+            ),
         },
     )
 }
 
-pub fn analyze_workload(a: &CsrMatrix, b: &CsrMatrix, config: &AutoSpGemmConfig) -> WorkloadEstimate {
+pub fn analyze_workload(
+    a: &CsrMatrix,
+    b: &CsrMatrix,
+    config: &AutoSpGemmConfig,
+) -> WorkloadEstimate {
     assert_eq!(a.cols, b.rows);
     let candidate_products = candidate_product_count(a, b);
     let sample_count = config.sample_rows.max(1).min(a.rows.max(1));
@@ -221,7 +233,11 @@ pub fn analyze_workload(a: &CsrMatrix, b: &CsrMatrix, config: &AutoSpGemmConfig)
     })
     .min(a.rows.saturating_mul(b.cols));
 
-    let sample_fraction = if a.rows == 0 { 1.0 } else { sampled_rows as f64 / a.rows as f64 };
+    let sample_fraction = if a.rows == 0 {
+        1.0
+    } else {
+        sampled_rows as f64 / a.rows as f64
+    };
     let estimated_active_columns = estimate_active_columns(
         unique_columns.len(),
         estimated_output_nnz,
@@ -247,7 +263,9 @@ pub fn analyze_workload(a: &CsrMatrix, b: &CsrMatrix, config: &AutoSpGemmConfig)
         // predicted recovery size. Round the inferred average before selecting
         // the next power of two; the live-support scheduler will refine q once
         // identity outer recovery exposes the real residual column count.
-        (avg_col.round().max(1.0) as usize).next_power_of_two().min(a.rows.max(1))
+        (avg_col.round().max(1.0) as usize)
+            .next_power_of_two()
+            .min(a.rows.max(1))
     };
     let buckets = (((target_q as f64) * config.moment.oversampling).ceil() as usize)
         .max(config.moment.degree)
@@ -265,13 +283,22 @@ pub fn analyze_workload(a: &CsrMatrix, b: &CsrMatrix, config: &AutoSpGemmConfig)
         reasons.push(format!("rho {:.1} < {:.1}", rho, config.min_estimated_rho));
     }
     if avg_col > config.max_estimated_avg_column_nnz {
-        reasons.push(format!("avg column nnz {:.1} > {:.1}", avg_col, config.max_estimated_avg_column_nnz));
+        reasons.push(format!(
+            "avg column nnz {:.1} > {:.1}",
+            avg_col, config.max_estimated_avg_column_nnz
+        ));
     }
     if output_density > config.max_estimated_output_density {
-        reasons.push(format!("output density {:.3} > {:.3}", output_density, config.max_estimated_output_density));
+        reasons.push(format!(
+            "output density {:.3} > {:.3}",
+            output_density, config.max_estimated_output_density
+        ));
     }
     if row_ratio >= config.max_moment_row_ratio {
-        reasons.push(format!("moment row ratio {:.3} >= {:.3}", row_ratio, config.max_moment_row_ratio));
+        reasons.push(format!(
+            "moment row ratio {:.3} >= {:.3}",
+            row_ratio, config.max_moment_row_ratio
+        ));
     }
     if estimated_output_nnz == 0 {
         reasons.push("sampled output is zero".to_string());
@@ -323,7 +350,9 @@ fn exact_dispatch(
     policy: RectangularPolicy,
     dense_cell_limit: usize,
 ) -> (CsrMatrix, Option<RectangularStats>, ExactMethod) {
-    let dense_cells = a.rows.saturating_mul(a.cols)
+    let dense_cells = a
+        .rows
+        .saturating_mul(a.cols)
         .saturating_add(b.rows.saturating_mul(b.cols))
         .saturating_add(a.rows.saturating_mul(b.cols));
     if dense_cells <= dense_cell_limit {
@@ -338,20 +367,31 @@ fn exact_dispatch(
 }
 
 fn evenly_spaced_rows(rows: usize, count: usize) -> Vec<usize> {
-    if rows == 0 || count == 0 { return Vec::new(); }
-    if count >= rows { return (0..rows).collect(); }
-    if count == 1 { return vec![rows / 2]; }
-    (0..count)
-        .map(|s| s * (rows - 1) / (count - 1))
-        .collect()
+    if rows == 0 || count == 0 {
+        return Vec::new();
+    }
+    if count >= rows {
+        return (0..rows).collect();
+    }
+    if count == 1 {
+        return vec![rows / 2];
+    }
+    (0..count).map(|s| s * (rows - 1) / (count - 1)).collect()
 }
 
 /// Infer total active columns from the number observed in a row sample. Under a
 /// roughly uniform per-column sparsity model, a column with K/C entries is seen
 /// with probability 1-(1-f)^(K/C). We choose the C whose expected observation
 /// count is closest to the measured union size.
-fn estimate_active_columns(observed: usize, k_est: usize, sample_fraction: f64, cols: usize) -> usize {
-    if observed == 0 || k_est == 0 || cols == 0 { return 0; }
+fn estimate_active_columns(
+    observed: usize,
+    k_est: usize,
+    sample_fraction: f64,
+    cols: usize,
+) -> usize {
+    if observed == 0 || k_est == 0 || cols == 0 {
+        return 0;
+    }
     let lo = observed.min(cols).max(1);
     let mut best = lo;
     let mut best_err = f64::INFINITY;
@@ -371,13 +411,16 @@ fn estimate_active_columns(observed: usize, k_est: usize, sample_fraction: f64, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::synthetic::{overlap_problem, sparse_output_problem};
     use crate::spgemm::spgemm_hash;
+    use crate::synthetic::{overlap_problem, sparse_output_problem};
 
     #[test]
     fn auto_analysis_prefers_sparse_output_and_rejects_dense_columns() {
         let sparse = sparse_output_problem(256, 512, 512, 128, 7, 0.75, 512);
-        let cfg = AutoSpGemmConfig { fingerprint: FingerprintConfig { lanes: 3, seed: 7 }, ..AutoSpGemmConfig::default() };
+        let cfg = AutoSpGemmConfig {
+            fingerprint: FingerprintConfig { lanes: 3, seed: 7 },
+            ..AutoSpGemmConfig::default()
+        };
         let se = analyze_workload(&sparse.a, &sparse.b, &cfg);
         assert!(se.choose_sketch, "{}", se.reason);
         assert!(se.estimated_avg_nnz_per_active_column < 32.0);
@@ -385,7 +428,10 @@ mod tests {
         let dense_cols = overlap_problem(256, 256, 256, 128, 0.5);
         let de = analyze_workload(&dense_cols.a, &dense_cols.b, &cfg);
         assert!(!de.choose_sketch);
-        assert!(de.estimated_avg_nnz_per_active_column > 64.0 || de.estimated_output_density > cfg.max_estimated_output_density);
+        assert!(
+            de.estimated_avg_nnz_per_active_column > 64.0
+                || de.estimated_output_density > cfg.max_estimated_output_density
+        );
     }
 
     #[test]
@@ -397,11 +443,17 @@ mod tests {
             min_estimated_rho: 16.0,
             max_estimated_avg_column_nnz: 16.0,
             max_estimated_output_density: 0.25,
-            fingerprint: FingerprintConfig { lanes: 3, seed: 123 },
+            fingerprint: FingerprintConfig {
+                lanes: 3,
+                seed: 123,
+            },
             ..AutoSpGemmConfig::default()
         };
         let (actual, stats) = auto_spgemm(&p.a, &p.b, cfg);
         assert_eq!(actual, expected);
-        assert!(matches!(stats.choice, AutoChoice::Sketch | AutoChoice::ExactFallback));
+        assert!(matches!(
+            stats.choice,
+            AutoChoice::Sketch | AutoChoice::ExactFallback
+        ));
     }
 }

@@ -8,7 +8,10 @@ pub mod sketch;
 pub mod spgemm;
 pub mod synthetic;
 
-pub use auto::{analyze_workload, auto_spgemm, candidate_product_count, AutoChoice, AutoSpGemmConfig, AutoSpGemmStats, ExactMethod, WorkloadEstimate};
+pub use auto::{
+    analyze_workload, auto_spgemm, candidate_product_count, AutoChoice, AutoSpGemmConfig,
+    AutoSpGemmStats, ExactMethod, WorkloadEstimate,
+};
 pub use fingerprint::{FingerprintConfig, FingerprintStats, ResidualFingerprint};
 pub use guv::{GuvConfig, GuvError, GuvParameters, GuvRecovery};
 pub use matrix::{CsrMatrix, DenseMatrix};
@@ -19,7 +22,8 @@ pub use recovery::{
     NestedRoundStats, NestedSpGemmStats, RecoveryBackend, SignatureConfig, SignatureRecovery,
 };
 pub use rect::{
-    adaptive_matmul, adaptive_matmul_prepared, PreparedFactor, RectangularKernel, RectangularPolicy, RectangularStats,
+    adaptive_matmul, adaptive_matmul_prepared, PreparedFactor, RectangularKernel,
+    RectangularPolicy, RectangularStats,
 };
 pub use sketch::{
     direct_two_sided_sketch, left_sketch, paper_schedule, right_sketch, RoundParams, SketchMap,

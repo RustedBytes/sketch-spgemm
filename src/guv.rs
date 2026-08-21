@@ -111,12 +111,7 @@ pub struct GuvRecovery {
 
 impl GuvParameters {
     /// Compute the literal parameters of Bennett et al. Algorithm 3.
-    pub fn new(
-        domain: usize,
-        capacity: usize,
-        alpha: f64,
-        epsilon: f64,
-    ) -> Result<Self, GuvError> {
+    pub fn new(domain: usize, capacity: usize, alpha: f64, epsilon: f64) -> Result<Self, GuvError> {
         if domain == 0 {
             return Err(GuvError::InvalidParameters("domain must be positive"));
         }
@@ -159,8 +154,8 @@ impl GuvParameters {
         let q = 1usize
             .checked_shl(field_bits)
             .ok_or(GuvError::ArithmeticOverflow("q"))?;
-        let right_vertices = checked_pow_usize(q, m + 1)
-            .ok_or(GuvError::ArithmeticOverflow("q^(m+1)"))?;
+        let right_vertices =
+            checked_pow_usize(q, m + 1).ok_or(GuvError::ArithmeticOverflow("q^(m+1)"))?;
         let measurement_rows = right_vertices
             .checked_mul(n)
             .ok_or(GuvError::ArithmeticOverflow("|R| * log(N+1)"))?;
@@ -183,12 +178,7 @@ impl GuvParameters {
 
     /// Saturating row estimate used to decide whether the theorem's identity
     /// fallback is cheaper before constructing any finite fields.
-    pub fn estimated_rows(
-        domain: usize,
-        capacity: usize,
-        alpha: f64,
-        epsilon: f64,
-    ) -> usize {
+    pub fn estimated_rows(domain: usize, capacity: usize, alpha: f64, epsilon: f64) -> usize {
         match Self::new(domain, capacity, alpha, epsilon) {
             Ok(p) => p.measurement_rows,
             Err(GuvError::ArithmeticOverflow(_)) => usize::MAX,
@@ -198,12 +188,7 @@ impl GuvParameters {
 }
 
 impl GuvRecovery {
-    pub fn new(
-        domain: usize,
-        capacity: usize,
-        alpha: f64,
-        epsilon: f64,
-    ) -> Result<Self, GuvError> {
+    pub fn new(domain: usize, capacity: usize, alpha: f64, epsilon: f64) -> Result<Self, GuvError> {
         let params = GuvParameters::new(domain, capacity, alpha, epsilon)?;
         if params.field_bits > 32 {
             return Err(GuvError::UnsupportedFieldDegree(params.field_bits));
@@ -253,12 +238,7 @@ impl GuvRecovery {
         let mut current = t;
         for i in 0..self.m {
             if i > 0 {
-                current = poly_pow_mod(
-                    &current,
-                    self.h,
-                    &self.extension_modulus,
-                    &self.field,
-                );
+                current = poly_pow_mod(&current, self.h, &self.extension_modulus, &self.field);
             }
             powers.push(current.clone());
         }
@@ -334,7 +314,6 @@ impl GuvRecovery {
             .filter(|entry| entry.get().is_some())
             .count()
     }
-
 }
 
 #[derive(Clone, Debug)]
@@ -350,8 +329,8 @@ impl BinaryExtensionField {
         if degree == 0 || degree > 32 {
             return Err(GuvError::UnsupportedFieldDegree(degree));
         }
-        let modulus = binary_irreducible_modulus(degree)
-            .ok_or(GuvError::UnsupportedFieldDegree(degree))?;
+        let modulus =
+            binary_irreducible_modulus(degree).ok_or(GuvError::UnsupportedFieldDegree(degree))?;
         let mask = if degree == 64 {
             u64::MAX
         } else {
@@ -554,12 +533,7 @@ fn poly_pow_mod(
     out
 }
 
-fn poly_mul_mod(
-    a: &[u64],
-    b: &[u64],
-    modulus: &[u64],
-    field: &BinaryExtensionField,
-) -> Vec<u64> {
+fn poly_mul_mod(a: &[u64], b: &[u64], modulus: &[u64], field: &BinaryExtensionField) -> Vec<u64> {
     if poly_is_zero(a) || poly_is_zero(b) {
         return vec![0];
     }
@@ -590,11 +564,7 @@ fn poly_add(a: &[u64], b: &[u64], field: &BinaryExtensionField) -> Vec<u64> {
     out
 }
 
-fn poly_mod(
-    mut a: Vec<u64>,
-    modulus: &[u64],
-    field: &BinaryExtensionField,
-) -> Vec<u64> {
+fn poly_mod(mut a: Vec<u64>, modulus: &[u64], field: &BinaryExtensionField) -> Vec<u64> {
     trim_poly(&mut a);
     let md = poly_degree(modulus);
     assert!(md >= 0, "zero polynomial modulus");
@@ -615,11 +585,7 @@ fn poly_mod(
     a
 }
 
-fn poly_gcd(
-    mut a: Vec<u64>,
-    mut b: Vec<u64>,
-    field: &BinaryExtensionField,
-) -> Vec<u64> {
+fn poly_gcd(mut a: Vec<u64>, mut b: Vec<u64>, field: &BinaryExtensionField) -> Vec<u64> {
     trim_poly(&mut a);
     trim_poly(&mut b);
     while !poly_is_zero(&b) {
