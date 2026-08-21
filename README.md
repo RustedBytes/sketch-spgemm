@@ -94,7 +94,7 @@ Clone the repository, run the tests, and execute the default benchmark:
 
 ```bash
 cargo test
-cargo run --release
+cargo run --release --example benchmark
 ```
 
 ### Library example
@@ -266,7 +266,7 @@ reused recovery factors do not pay repeated conversion costs. The one-shot
 ## Recommended sparse-output benchmark
 
 ```bash
-cargo run --release -- \
+cargo run --release --example benchmark -- \
   --synthetic sparse-output \
   --rows 256 \
   --inner 512 \
@@ -351,8 +351,9 @@ src/
 ├── sketch.rs      probes and the Graia q/p/t schedule
 ├── spgemm.rs      hash baseline and simple dense kernel
 ├── synthetic.rs   synthetic sparse-output workloads
-├── lib.rs         public library exports
-└── main.rs        benchmark CLI
+└── lib.rs         public library exports
+examples/
+└── benchmark.rs   research and benchmark CLI
 ```
 
 ## Project status

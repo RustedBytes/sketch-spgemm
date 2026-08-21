@@ -581,7 +581,7 @@ fn parse_bool(value: &str) -> bool {
 }
 
 fn print_help() {
-    println!("Usage: cargo run --release -- [options]");
+    println!("Usage: cargo run --release --example benchmark -- [options]");
     println!("  --rows N                    A rows (default 256)");
     println!("  --inner N                   shared dimension (default 256)");
     println!("  --cols N                    B columns (default 256)");
