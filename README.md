@@ -1,6 +1,7 @@
 # SketchSpGEMM
 
 [![Crates.io](https://img.shields.io/crates/v/sketch-spgemm.svg)](https://crates.io/crates/sketch-spgemm)
+[![PyPI version](https://img.shields.io/pypi/v/sketch-spgemm.svg)](https://pypi.org/project/sketch-spgemm/)
 [![Documentation](https://docs.rs/sketch-spgemm/badge.svg)](https://docs.rs/sketch-spgemm)
 [![License: MIT](https://img.shields.io/crates/l/sketch-spgemm.svg)](#license)
 
