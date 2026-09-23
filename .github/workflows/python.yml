@@ -35,7 +35,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install build and test tools
-        run: python -m pip install "maturin>=1,<2" "numpy>=1.23" "pytest>=7"
+        run: python -m pip install "maturin>=1,<2" "numpy>=1.23" "pytest>=7" "scipy>=1.10"
       - name: Build extension wheel
         run: maturin build --release --out dist
       - name: Install extension wheel

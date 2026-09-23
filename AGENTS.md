@@ -84,9 +84,9 @@ changes separately from source changes.
 
 ## Python bindings
 
-The supported matrix value dtypes are exactly `int32`, `int64`, `float32`, and
-`float64`. CSR indices, COO row/column indices, and row pointers remain
-contiguous one-dimensional `int64` NumPy arrays.
+The supported matrix value dtypes are exactly `int32`, `int64`, `uint64`,
+`float32`, and `float64`. CSR indices, COO row/column indices, and row pointers
+remain contiguous one-dimensional `int64` NumPy arrays.
 
 - Preserve dtype through construction, `CsrBuilder`, `to_arrays`, `to_dense`,
   and multiplication results.
@@ -96,7 +96,8 @@ contiguous one-dimensional `int64` NumPy arrays.
   sketch pipeline.
 - Preserve exception categories: invalid shapes/order/storage are `ValueError`,
   unsupported or mixed dtypes are `TypeError`, checked arithmetic failures are
-  `OverflowError`, and consumed-builder lifecycle errors are `RuntimeError`.
+  `OverflowError`, output-budget failures are `MemoryError`, and
+  consumed-builder lifecycle errors are `RuntimeError`.
 - When adding or changing a Python symbol, update all of: the PyO3 module,
   `python/sketch_spgemm/__init__.py`, `__init__.pyi`,
   `_sketch_spgemm.pyi`, documentation, and tests as applicable.

@@ -1,3 +1,5 @@
+from typing import Any
+
 from ._sketch_spgemm import (
     AutoSpGemmConfig as AutoSpGemmConfig,
     AutoSpGemmStats as AutoSpGemmStats,
@@ -18,4 +20,8 @@ from ._sketch_spgemm import (
     analyze_workload as analyze_workload,
     auto_spgemm as auto_spgemm,
     checked_spgemm as checked_spgemm,
+    spgemm as spgemm,
 )
+
+def from_scipy(matrix: Any) -> CsrMatrix: ...
+def to_scipy(matrix: CsrMatrix) -> Any: ...

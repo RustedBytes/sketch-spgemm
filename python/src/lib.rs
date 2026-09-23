@@ -2,7 +2,7 @@
 
 use numpy::ndarray::Array2;
 use numpy::{Element, IntoPyArray, PyReadonlyArray1};
-use pyo3::exceptions::{PyOverflowError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyMemoryError, PyOverflowError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use sketch_spgemm as core;
@@ -183,13 +183,14 @@ where
 }
 
 fn dtype_error() -> PyErr {
-    PyTypeError::new_err("data dtype must be one of: int32, int64, float32, float64")
+    PyTypeError::new_err("data dtype must be one of: int32, int64, uint64, float32, float64")
 }
 
 fn parse_dtype(dtype: &str) -> PyResult<&'static str> {
     match dtype {
         "int32" | "i32" => Ok("int32"),
         "int64" | "i64" => Ok("int64"),
+        "uint64" | "u64" => Ok("uint64"),
         "float32" | "f32" => Ok("float32"),
         "float64" | "f64" => Ok("float64"),
         _ => Err(dtype_error()),
@@ -250,6 +251,7 @@ fn rectangular_kernel_name(value: core::RectangularKernel) -> &'static str {
 enum CsrStorage {
     I32(Arc<core::CsrMatrix<i32>>),
     I64(Arc<core::CsrMatrix<i64>>),
+    U64(Arc<core::CsrMatrix<u64>>),
     F32(Arc<core::CsrMatrix<f32>>),
     F64(Arc<core::CsrMatrix<f64>>),
 }
@@ -259,6 +261,7 @@ impl CsrStorage {
         match self {
             Self::I32(matrix) => matrix.rows,
             Self::I64(matrix) => matrix.rows,
+            Self::U64(matrix) => matrix.rows,
             Self::F32(matrix) => matrix.rows,
             Self::F64(matrix) => matrix.rows,
         }
@@ -268,6 +271,7 @@ impl CsrStorage {
         match self {
             Self::I32(matrix) => matrix.cols,
             Self::I64(matrix) => matrix.cols,
+            Self::U64(matrix) => matrix.cols,
             Self::F32(matrix) => matrix.cols,
             Self::F64(matrix) => matrix.cols,
         }
@@ -277,6 +281,7 @@ impl CsrStorage {
         match self {
             Self::I32(matrix) => matrix.nnz(),
             Self::I64(matrix) => matrix.nnz(),
+            Self::U64(matrix) => matrix.nnz(),
             Self::F32(matrix) => matrix.nnz(),
             Self::F64(matrix) => matrix.nnz(),
         }
@@ -286,8 +291,29 @@ impl CsrStorage {
         match self {
             Self::I32(_) => "int32",
             Self::I64(_) => "int64",
+            Self::U64(_) => "uint64",
             Self::F32(_) => "float32",
             Self::F64(_) => "float64",
+        }
+    }
+
+    fn transpose(&self) -> Self {
+        match self {
+            Self::I32(matrix) => Self::I32(Arc::new(matrix.transpose())),
+            Self::I64(matrix) => Self::I64(Arc::new(matrix.transpose())),
+            Self::U64(matrix) => Self::U64(Arc::new(matrix.transpose())),
+            Self::F32(matrix) => Self::F32(Arc::new(matrix.transpose())),
+            Self::F64(matrix) => Self::F64(Arc::new(matrix.transpose())),
+        }
+    }
+
+    fn structural(&self) -> Self {
+        match self {
+            Self::I32(matrix) => Self::I32(Arc::new(matrix.structural(1))),
+            Self::I64(matrix) => Self::I64(Arc::new(matrix.structural(1))),
+            Self::U64(matrix) => Self::U64(Arc::new(matrix.structural(1))),
+            Self::F32(matrix) => Self::F32(Arc::new(matrix.structural(1.0))),
+            Self::F64(matrix) => Self::F64(Arc::new(matrix.structural(1.0))),
         }
     }
 }
@@ -326,6 +352,13 @@ where
     Ok(array.into_pyarray(py).into_any().unbind())
 }
 
+fn vector_to_python<T>(py: Python<'_>, values: Vec<T>) -> Py<PyAny>
+where
+    T: Element,
+{
+    values.into_pyarray(py).into_any().unbind()
+}
+
 /// Immutable canonical CSR matrix with a NumPy-compatible numeric dtype.
 #[pyclass(name = "CsrMatrix", frozen, module = "sketch_spgemm._sketch_spgemm")]
 struct PyCsrMatrix {
@@ -342,6 +375,12 @@ impl PyCsrMatrix {
     fn from_i64(inner: core::CsrMatrix<i64>) -> Self {
         Self {
             inner: CsrStorage::I64(Arc::new(inner)),
+        }
+    }
+
+    fn from_u64(inner: core::CsrMatrix<u64>) -> Self {
+        Self {
+            inner: CsrStorage::U64(Arc::new(inner)),
         }
     }
 
@@ -372,6 +411,9 @@ impl PyCsrMatrix {
         }
         if let Ok(values) = data.extract::<PyReadonlyArray1<'_, i64>>() {
             return csr_from_arrays(values, indices, indptr, shape).map(Self::from_i64);
+        }
+        if let Ok(values) = data.extract::<PyReadonlyArray1<'_, u64>>() {
+            return csr_from_arrays(values, indices, indptr, shape).map(Self::from_u64);
         }
         if let Ok(values) = data.extract::<PyReadonlyArray1<'_, f32>>() {
             return csr_from_arrays(values, indices, indptr, shape).map(Self::from_f32);
@@ -414,6 +456,7 @@ impl PyCsrMatrix {
         }
         build!(i32, from_i32);
         build!(i64, from_i64);
+        build!(u64, from_u64);
         build!(f32, from_f32);
         build!(f64, from_f64);
         Err(dtype_error())
@@ -448,6 +491,7 @@ impl PyCsrMatrix {
         match &self.inner {
             CsrStorage::I32(matrix) => arrays_to_python(py, matrix),
             CsrStorage::I64(matrix) => arrays_to_python(py, matrix),
+            CsrStorage::U64(matrix) => arrays_to_python(py, matrix),
             CsrStorage::F32(matrix) => arrays_to_python(py, matrix),
             CsrStorage::F64(matrix) => arrays_to_python(py, matrix),
         }
@@ -457,8 +501,160 @@ impl PyCsrMatrix {
         match &self.inner {
             CsrStorage::I32(matrix) => dense_to_python(py, matrix),
             CsrStorage::I64(matrix) => dense_to_python(py, matrix),
+            CsrStorage::U64(matrix) => dense_to_python(py, matrix),
             CsrStorage::F32(matrix) => dense_to_python(py, matrix),
             CsrStorage::F64(matrix) => dense_to_python(py, matrix),
+        }
+    }
+
+    /// Return the canonical sparse transpose.
+    fn transpose(&self) -> Self {
+        Self {
+            inner: self.inner.transpose(),
+        }
+    }
+
+    /// Preserve the sparsity pattern and replace all stored values with one.
+    fn binarize(&self) -> Self {
+        Self {
+            inner: self.inner.structural(),
+        }
+    }
+
+    /// Add two matrices with checked scalar arithmetic.
+    fn checked_add(&self, other: PyRef<'_, Self>) -> PyResult<Self> {
+        match (&self.inner, &other.inner) {
+            (CsrStorage::I32(left), CsrStorage::I32(right)) => left
+                .try_add(right)
+                .map(Self::from_i32)
+                .map_err(map_core_error),
+            (CsrStorage::I64(left), CsrStorage::I64(right)) => left
+                .try_add(right)
+                .map(Self::from_i64)
+                .map_err(map_core_error),
+            (CsrStorage::U64(left), CsrStorage::U64(right)) => left
+                .try_add(right)
+                .map(Self::from_u64)
+                .map_err(map_core_error),
+            (CsrStorage::F32(left), CsrStorage::F32(right)) => left
+                .try_add(right)
+                .map(Self::from_f32)
+                .map_err(map_core_error),
+            (CsrStorage::F64(left), CsrStorage::F64(right)) => left
+                .try_add(right)
+                .map(Self::from_f64)
+                .map_err(map_core_error),
+            _ => Err(PyTypeError::new_err(
+                "left and right matrices must have the same dtype",
+            )),
+        }
+    }
+
+    /// Checked row reductions preserving the matrix dtype.
+    fn row_sums(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.inner {
+            CsrStorage::I32(matrix) => matrix
+                .try_row_sums()
+                .map(|values| vector_to_python(py, values))
+                .map_err(map_build_error),
+            CsrStorage::I64(matrix) => matrix
+                .try_row_sums()
+                .map(|values| vector_to_python(py, values))
+                .map_err(map_build_error),
+            CsrStorage::U64(matrix) => matrix
+                .try_row_sums()
+                .map(|values| vector_to_python(py, values))
+                .map_err(map_build_error),
+            CsrStorage::F32(matrix) => matrix
+                .try_row_sums()
+                .map(|values| vector_to_python(py, values))
+                .map_err(map_build_error),
+            CsrStorage::F64(matrix) => matrix
+                .try_row_sums()
+                .map(|values| vector_to_python(py, values))
+                .map_err(map_build_error),
+        }
+    }
+
+    /// Checked column reductions preserving the matrix dtype.
+    fn column_sums(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.inner {
+            CsrStorage::I32(matrix) => matrix
+                .try_column_sums()
+                .map(|values| vector_to_python(py, values))
+                .map_err(map_build_error),
+            CsrStorage::I64(matrix) => matrix
+                .try_column_sums()
+                .map(|values| vector_to_python(py, values))
+                .map_err(map_build_error),
+            CsrStorage::U64(matrix) => matrix
+                .try_column_sums()
+                .map(|values| vector_to_python(py, values))
+                .map_err(map_build_error),
+            CsrStorage::F32(matrix) => matrix
+                .try_column_sums()
+                .map(|values| vector_to_python(py, values))
+                .map_err(map_build_error),
+            CsrStorage::F64(matrix) => matrix
+                .try_column_sums()
+                .map(|values| vector_to_python(py, values))
+                .map_err(map_build_error),
+        }
+    }
+
+    fn row_nnz(&self, py: Python<'_>) -> Py<PyAny> {
+        let counts = match &self.inner {
+            CsrStorage::I32(matrix) => matrix.row_nnz(),
+            CsrStorage::I64(matrix) => matrix.row_nnz(),
+            CsrStorage::U64(matrix) => matrix.row_nnz(),
+            CsrStorage::F32(matrix) => matrix.row_nnz(),
+            CsrStorage::F64(matrix) => matrix.row_nnz(),
+        };
+        vector_to_python(py, counts.into_iter().map(|value| value as i64).collect())
+    }
+
+    fn column_nnz(&self, py: Python<'_>) -> Py<PyAny> {
+        let counts = match &self.inner {
+            CsrStorage::I32(matrix) => matrix.column_nnz(),
+            CsrStorage::I64(matrix) => matrix.column_nnz(),
+            CsrStorage::U64(matrix) => matrix.column_nnz(),
+            CsrStorage::F32(matrix) => matrix.column_nnz(),
+            CsrStorage::F64(matrix) => matrix.column_nnz(),
+        };
+        vector_to_python(py, counts.into_iter().map(|value| value as i64).collect())
+    }
+
+    /// Copy selected rows into a compact matrix in the requested order.
+    fn select_rows(&self, row_indices: PyReadonlyArray1<'_, i64>) -> PyResult<Self> {
+        let row_indices = row_indices
+            .as_slice()
+            .map_err(|_| value_error("row_indices must be a contiguous one-dimensional array"))?;
+        let rows = row_indices
+            .iter()
+            .enumerate()
+            .map(|(position, &row)| nonnegative_index("row_indices", position, row))
+            .collect::<PyResult<Vec<_>>>()?;
+        match &self.inner {
+            CsrStorage::I32(matrix) => matrix
+                .select_rows(&rows)
+                .map(Self::from_i32)
+                .map_err(map_build_error),
+            CsrStorage::I64(matrix) => matrix
+                .select_rows(&rows)
+                .map(Self::from_i64)
+                .map_err(map_build_error),
+            CsrStorage::U64(matrix) => matrix
+                .select_rows(&rows)
+                .map(Self::from_u64)
+                .map_err(map_build_error),
+            CsrStorage::F32(matrix) => matrix
+                .select_rows(&rows)
+                .map(Self::from_f32)
+                .map_err(map_build_error),
+            CsrStorage::F64(matrix) => matrix
+                .select_rows(&rows)
+                .map(Self::from_f64)
+                .map_err(map_build_error),
         }
     }
 
@@ -476,6 +672,7 @@ impl PyCsrMatrix {
 enum CsrBuilderStorage {
     I32(core::CsrBuilder<i32>),
     I64(core::CsrBuilder<i64>),
+    U64(core::CsrBuilder<u64>),
     F32(core::CsrBuilder<f32>),
     F64(core::CsrBuilder<f64>),
 }
@@ -485,6 +682,7 @@ impl CsrBuilderStorage {
         match self {
             Self::I32(builder) => PyCsrMatrix::from_i32(builder.finish()),
             Self::I64(builder) => PyCsrMatrix::from_i64(builder.finish()),
+            Self::U64(builder) => PyCsrMatrix::from_u64(builder.finish()),
             Self::F32(builder) => PyCsrMatrix::from_f32(builder.finish()),
             Self::F64(builder) => PyCsrMatrix::from_f64(builder.finish()),
         }
@@ -517,6 +715,9 @@ impl PyCsrBuilder {
             }
             "int64" => {
                 CsrBuilderStorage::I64(core::CsrBuilder::with_capacity(rows, cols, capacity))
+            }
+            "uint64" => {
+                CsrBuilderStorage::U64(core::CsrBuilder::with_capacity(rows, cols, capacity))
             }
             "float32" => {
                 CsrBuilderStorage::F32(core::CsrBuilder::with_capacity(rows, cols, capacity))
@@ -561,6 +762,7 @@ impl PyCsrBuilder {
         match self.active()? {
             CsrBuilderStorage::I32(builder) => builder.try_push(row, column, value.extract()?),
             CsrBuilderStorage::I64(builder) => builder.try_push(row, column, value.extract()?),
+            CsrBuilderStorage::U64(builder) => builder.try_push(row, column, value.extract()?),
             CsrBuilderStorage::F32(builder) => builder.try_push(row, column, value.extract()?),
             CsrBuilderStorage::F64(builder) => builder.try_push(row, column, value.extract()?),
         }
@@ -584,6 +786,12 @@ impl PyCsrBuilder {
                 column_indices,
             ),
             CsrBuilderStorage::I64(builder) => extend_builder(
+                builder,
+                data.extract().map_err(|_| dtype_error())?,
+                row_indices,
+                column_indices,
+            ),
+            CsrBuilderStorage::U64(builder) => extend_builder(
                 builder,
                 data.extract().map_err(|_| dtype_error())?,
                 row_indices,
@@ -1257,6 +1465,9 @@ impl From<core::SpGemmStats> for PySpGemmStats {
 fn map_core_error(error: core::SpGemmError) -> PyErr {
     match error {
         core::SpGemmError::DimensionMismatch { .. } => value_error(error.to_string()),
+        core::SpGemmError::OutputNnzLimitExceeded { .. } => {
+            PyMemoryError::new_err(error.to_string())
+        }
         core::SpGemmError::IndexOverflow { .. } | core::SpGemmError::ArithmeticOverflow { .. } => {
             PyOverflowError::new_err(error.to_string())
         }
@@ -1268,34 +1479,130 @@ fn map_core_error(error: core::SpGemmError) -> PyErr {
 }
 
 #[pyfunction]
-/// Multiply two CSR matrices with overflow-detecting exact arithmetic.
-fn checked_spgemm(
+#[pyo3(signature = (left, right, *, max_output_nnz=None))]
+/// Multiply two same-dtype CSR matrices with the exact direct kernel.
+fn spgemm(
     py: Python<'_>,
     left: PyRef<'_, PyCsrMatrix>,
     right: PyRef<'_, PyCsrMatrix>,
+    max_output_nnz: Option<usize>,
 ) -> PyResult<(PyCsrMatrix, PySpGemmStats)> {
+    let options = core::SpGemmOptions { max_output_nnz };
     match (left.inner.clone(), right.inner.clone()) {
         (CsrStorage::I32(left), CsrStorage::I32(right)) => {
             let (product, stats) = py
-                .detach(move || core::try_spgemm_checked(left.as_ref(), right.as_ref()))
+                .detach(move || {
+                    core::try_spgemm_hash_with_options(left.as_ref(), right.as_ref(), options)
+                })
                 .map_err(map_core_error)?;
             Ok((PyCsrMatrix::from_i32(product), stats.into()))
         }
         (CsrStorage::I64(left), CsrStorage::I64(right)) => {
             let (product, stats) = py
-                .detach(move || core::try_spgemm_checked(left.as_ref(), right.as_ref()))
+                .detach(move || {
+                    core::try_spgemm_hash_with_options(left.as_ref(), right.as_ref(), options)
+                })
                 .map_err(map_core_error)?;
             Ok((PyCsrMatrix::from_i64(product), stats.into()))
         }
+        (CsrStorage::U64(left), CsrStorage::U64(right)) => {
+            let (product, stats) = py
+                .detach(move || {
+                    core::try_spgemm_hash_with_options(left.as_ref(), right.as_ref(), options)
+                })
+                .map_err(map_core_error)?;
+            Ok((PyCsrMatrix::from_u64(product), stats.into()))
+        }
         (CsrStorage::F32(left), CsrStorage::F32(right)) => {
             let (product, stats) = py
-                .detach(move || core::try_spgemm_checked(left.as_ref(), right.as_ref()))
+                .detach(move || {
+                    core::try_spgemm_hash_with_options(left.as_ref(), right.as_ref(), options)
+                })
                 .map_err(map_core_error)?;
             Ok((PyCsrMatrix::from_f32(product), stats.into()))
         }
         (CsrStorage::F64(left), CsrStorage::F64(right)) => {
             let (product, stats) = py
-                .detach(move || core::try_spgemm_checked(left.as_ref(), right.as_ref()))
+                .detach(move || {
+                    core::try_spgemm_hash_with_options(left.as_ref(), right.as_ref(), options)
+                })
+                .map_err(map_core_error)?;
+            Ok((PyCsrMatrix::from_f64(product), stats.into()))
+        }
+        _ => Err(PyTypeError::new_err(
+            "left and right matrices must have the same dtype",
+        )),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (left, right, *, max_output_nnz=None))]
+/// Multiply two CSR matrices with overflow-detecting exact arithmetic.
+fn checked_spgemm(
+    py: Python<'_>,
+    left: PyRef<'_, PyCsrMatrix>,
+    right: PyRef<'_, PyCsrMatrix>,
+    max_output_nnz: Option<usize>,
+) -> PyResult<(PyCsrMatrix, PySpGemmStats)> {
+    let options = core::SpGemmOptions { max_output_nnz };
+    match (left.inner.clone(), right.inner.clone()) {
+        (CsrStorage::I32(left), CsrStorage::I32(right)) => {
+            let (product, stats) = py
+                .detach(move || {
+                    core::try_spgemm_hash_checked_with_options(
+                        left.as_ref(),
+                        right.as_ref(),
+                        options,
+                    )
+                })
+                .map_err(map_core_error)?;
+            Ok((PyCsrMatrix::from_i32(product), stats.into()))
+        }
+        (CsrStorage::I64(left), CsrStorage::I64(right)) => {
+            let (product, stats) = py
+                .detach(move || {
+                    core::try_spgemm_hash_checked_with_options(
+                        left.as_ref(),
+                        right.as_ref(),
+                        options,
+                    )
+                })
+                .map_err(map_core_error)?;
+            Ok((PyCsrMatrix::from_i64(product), stats.into()))
+        }
+        (CsrStorage::U64(left), CsrStorage::U64(right)) => {
+            let (product, stats) = py
+                .detach(move || {
+                    core::try_spgemm_hash_checked_with_options(
+                        left.as_ref(),
+                        right.as_ref(),
+                        options,
+                    )
+                })
+                .map_err(map_core_error)?;
+            Ok((PyCsrMatrix::from_u64(product), stats.into()))
+        }
+        (CsrStorage::F32(left), CsrStorage::F32(right)) => {
+            let (product, stats) = py
+                .detach(move || {
+                    core::try_spgemm_hash_checked_with_options(
+                        left.as_ref(),
+                        right.as_ref(),
+                        options,
+                    )
+                })
+                .map_err(map_core_error)?;
+            Ok((PyCsrMatrix::from_f32(product), stats.into()))
+        }
+        (CsrStorage::F64(left), CsrStorage::F64(right)) => {
+            let (product, stats) = py
+                .detach(move || {
+                    core::try_spgemm_hash_checked_with_options(
+                        left.as_ref(),
+                        right.as_ref(),
+                        options,
+                    )
+                })
                 .map_err(map_core_error)?;
             Ok((PyCsrMatrix::from_f64(product), stats.into()))
         }
@@ -1392,6 +1699,7 @@ fn py_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNestedSpGemmStats>()?;
     m.add_class::<PyAutoSpGemmStats>()?;
     m.add_class::<PySpGemmStats>()?;
+    m.add_function(wrap_pyfunction!(spgemm, m)?)?;
     m.add_function(wrap_pyfunction!(checked_spgemm, m)?)?;
     m.add_function(wrap_pyfunction!(auto_spgemm, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_workload, m)?)?;

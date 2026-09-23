@@ -52,7 +52,7 @@ def test_checked_product_and_overflow(operands):
         ssg.checked_spgemm(overflowing_left, multiplier)
 
 
-@pytest.mark.parametrize("dtype", [np.int32, np.int64, np.float32, np.float64])
+@pytest.mark.parametrize("dtype", [np.int32, np.int64, np.uint64, np.float32, np.float64])
 def test_supported_matrix_dtypes(dtype):
     data = np.asarray([2, 3, 4], dtype=dtype)
     left = ssg.CsrMatrix(
@@ -77,7 +77,7 @@ def test_supported_matrix_dtypes(dtype):
     assert stats.candidate_products == 5
 
 
-@pytest.mark.parametrize("dtype", ["int32", "int64", "float32", "float64"])
+@pytest.mark.parametrize("dtype", ["int32", "int64", "uint64", "float32", "float64"])
 def test_streaming_builder_preserves_dtype(dtype):
     numpy_dtype = np.dtype(dtype)
     builder = ssg.CsrBuilder(2, 2, dtype=dtype)
@@ -102,7 +102,7 @@ def test_dtype_validation_and_algorithm_boundaries():
     indptr = np.asarray([0, 1], dtype=np.int64)
     with pytest.raises(TypeError, match="data dtype"):
         ssg.CsrMatrix(
-            np.asarray([1], dtype=np.uint64),  # pyright: ignore[reportArgumentType]
+            np.asarray([1], dtype=np.uint32),  # pyright: ignore[reportArgumentType]
             indices,
             indptr,
             (1, 1),
@@ -132,6 +132,71 @@ def test_int32_checked_overflow():
     )
     with pytest.raises(OverflowError, match="multiplication"):
         ssg.checked_spgemm(left, right)
+
+
+def test_uint64_checked_overflow():
+    indices = np.asarray([0], dtype=np.int64)
+    indptr = np.asarray([0, 1], dtype=np.int64)
+    left = ssg.CsrMatrix(
+        np.asarray([np.iinfo(np.uint64).max], dtype=np.uint64), indices, indptr, (1, 1)
+    )
+    right = ssg.CsrMatrix(np.asarray([2], dtype=np.uint64), indices, indptr, (1, 1))
+    with pytest.raises(OverflowError, match="multiplication"):
+        ssg.checked_spgemm(left, right)
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.int64, np.uint64, np.float32, np.float64])
+def test_sparse_operations_preserve_dtype(dtype):
+    matrix = ssg.CsrMatrix.from_triplets(
+        np.asarray([2, 3, 4], dtype=dtype),
+        np.asarray([0, 0, 1], dtype=np.int64),
+        np.asarray([0, 2, 1], dtype=np.int64),
+        (2, 3),
+    )
+    transposed = matrix.transpose()
+    assert transposed.shape == (3, 2)
+    assert transposed.dtype == np.dtype(dtype).name
+    np.testing.assert_allclose(transposed.to_dense(), matrix.to_dense().T)
+    np.testing.assert_array_equal(matrix.row_nnz(), [2, 1])
+    np.testing.assert_array_equal(matrix.column_nnz(), [1, 1, 1])
+    np.testing.assert_allclose(matrix.row_sums(), [5, 4])
+    np.testing.assert_allclose(matrix.column_sums(), [2, 4, 3])
+    np.testing.assert_array_equal(matrix.binarize().to_dense(), [[1, 0, 1], [0, 1, 0]])
+    doubled = matrix.checked_add(matrix)
+    np.testing.assert_allclose(doubled.to_dense(), matrix.to_dense() * 2)
+    assert doubled.to_dense().dtype == dtype
+    selected = matrix.select_rows(np.asarray([1, 0, 1], dtype=np.int64))
+    np.testing.assert_allclose(selected.to_dense(), matrix.to_dense()[[1, 0, 1]])
+
+
+def test_direct_spgemm_and_output_budget(operands):
+    left, right = operands
+    product, stats = ssg.spgemm(left, right, max_output_nnz=4)
+    np.testing.assert_array_equal(product.to_dense(), [[31, 33], [28, 44]])
+    assert stats.candidate_products == 5
+    with pytest.raises(MemoryError, match="exceeding limit 3"):
+        ssg.spgemm(left, right, max_output_nnz=3)
+    with pytest.raises(MemoryError, match="exceeding limit 3"):
+        ssg.checked_spgemm(left, right, max_output_nnz=3)
+
+
+def test_scipy_style_csr_adapters():
+    scipy_sparse = pytest.importorskip("scipy.sparse")
+    source = scipy_sparse.csr_matrix(
+        (
+            np.asarray([1, 2, 3, 0], dtype=np.int32),
+            np.asarray([0, 0, 1, 0], dtype=np.int32),
+            np.asarray([0, 2, 4], dtype=np.int32),
+        ),
+        shape=(2, 2),
+    )
+    matrix = ssg.from_scipy(source)
+    assert matrix.dtype == "int32"
+    np.testing.assert_array_equal(matrix.to_dense(), [[3, 0], [0, 3]])
+
+    round_trip = ssg.to_scipy(matrix)
+    assert scipy_sparse.isspmatrix_csr(round_trip)
+    np.testing.assert_array_equal(round_trip.toarray(), matrix.to_dense())
 
 
 def test_csr_from_unsorted_triplets():

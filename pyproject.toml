@@ -25,8 +25,9 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
-dev = ["pytest>=7", "pyright>=1.1.405", "ruff>=0.13"]
+test = ["pytest>=7", "scipy>=1.10"]
+dev = ["pytest>=7", "pyright>=1.1.405", "ruff>=0.13", "scipy>=1.10"]
+scipy = ["scipy>=1.10"]
 
 [tool.maturin]
 manifest-path = "python/Cargo.toml"

@@ -131,9 +131,9 @@ np.testing.assert_array_equal(product.to_dense(), [[31, 33], [28, 44]])
 print(stats.choice, stats.timing.total)
 ```
 
-`data` must be a contiguous one-dimensional `int32`, `int64`, `float32`, or
-`float64` array. `indices` and `indptr` remain contiguous one-dimensional
-`int64` arrays. Column indices in each row must be strictly increasing,
+`data` must be a contiguous one-dimensional `int32`, `int64`, `uint64`,
+`float32`, or `float64` array. `indices` and `indptr` remain contiguous
+one-dimensional `int64` arrays. Column indices in each row must be strictly increasing,
 duplicates and explicit zero values are rejected, and the constructor copies
 all input data. `auto_spgemm` and `analyze_workload` require `int64` matrices;
 `checked_spgemm` supports every listed dtype and requires both operands to have
@@ -168,6 +168,30 @@ streamed_matrix = builder.finish()
 raise Python `OverflowError`; malformed coordinates raise `ValueError`.
 `extend` is streaming rather than transactional: if a later coordinate fails,
 the successfully processed prefix remains in the builder.
+
+Exact direct multiplication and common transaction-graph transformations are
+available for every supported dtype:
+
+```python
+import numpy as np
+
+from sketch_spgemm import from_scipy, spgemm, to_scipy
+
+two_hop, stats = spgemm(matrix, matrix, max_output_nnz=1_000_000)
+incoming = matrix.transpose()
+degrees = matrix.row_nnz()
+outflow = matrix.row_sums()
+binary = matrix.binarize()
+combined = matrix.checked_add(other)
+focused = matrix.select_rows(np.array([10, 42, 99], dtype=np.int64))
+
+# SciPy remains optional; install with `pip install sketch-spgemm[scipy]`.
+native = from_scipy(scipy_csr)
+scipy_csr = to_scipy(native)
+```
+
+An exceeded `max_output_nnz` raises `MemoryError` before the completed row is
+appended to the result. SciPy adapters copy into canonical owned storage.
 
 ### Library example
 
@@ -422,6 +446,15 @@ path allocates per-row maps; `try_from_sorted_triplets` and `CsrBuilder` are the
 streaming alternatives for already ordered data. `CsrBuilder::try_extend` is
 non-transactional: entries preceding an error remain applied to the builder.
 
+Canonical CSR matrices also provide `transpose`, `try_add`, `structural`,
+`select_rows`, `row_nnz`, `column_nnz`, `try_row_sums`, and `try_column_sums`.
+Direct products can enforce an output budget through `SpGemmOptions`. For
+domain-specific path algebras, implement `Semiring<T>` and call
+`try_spgemm_semiring`. Inputs can be losslessly converted to a wider checked
+output type with
+`try_spgemm_checked_with_accumulator`, such as `i64` inputs accumulated into an
+`i128` result.
+
 Kernels continue to accept concrete dense or CSR types so representation
 dispatch happens outside performance-sensitive inner loops.
 
@@ -550,6 +583,9 @@ spgemm_hash(...)                   direct CSR baseline
 try_spgemm_hash(...)               fallible scalar-generic CSR baseline
 try_spgemm_checked(...)            overflow-detecting exact CSR product
 try_spgemm_hash_checked(...)       checked hash-accumulator kernel
+try_spgemm_hash_with_options(...)  direct product with output budget
+try_spgemm_semiring(...)           configurable path algebra
+try_spgemm_checked_with_accumulator(...) widened checked result
 try_dense_matmul_checked(...)      checked dense product
 CsrMatrix::try_from_triplets(...)  checked unsorted COO conversion
 CsrBuilder                         checked streaming sorted COO conversion

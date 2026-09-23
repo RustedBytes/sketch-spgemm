@@ -73,6 +73,13 @@ pub enum SpGemmError {
         /// Output column being computed.
         column: usize,
     },
+    /// A configured output-size budget would be exceeded.
+    OutputNnzLimitExceeded {
+        /// Maximum number of entries allowed in the output.
+        limit: usize,
+        /// Number of entries required after completing the current row.
+        attempted: usize,
+    },
 }
 
 impl fmt::Display for SpGemmError {
@@ -100,6 +107,10 @@ impl fmt::Display for SpGemmError {
             } => write!(
                 f,
                 "arithmetic overflow during {operation} at output ({row}, {column}) through inner index {inner}"
+            ),
+            Self::OutputNnzLimitExceeded { limit, attempted } => write!(
+                f,
+                "sparse product requires at least {attempted} output entries, exceeding limit {limit}"
             ),
         }
     }

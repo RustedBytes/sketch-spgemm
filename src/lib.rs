@@ -59,6 +59,8 @@ pub mod fingerprint;
 pub mod guv;
 /// Generic dense, CSR, and representation-independent matrix types.
 pub mod matrix;
+/// Canonical CSR transformations and checked element-wise operations.
+pub mod ops;
 /// Sparse-recovery backends and nested multiplication algorithms.
 pub mod recovery;
 /// Adaptive rectangular dense/sparse multiplication kernels.
@@ -100,7 +102,9 @@ pub use sketch::{
     direct_two_sided_sketch, left_sketch, paper_schedule, right_sketch, RoundParams, SketchMap,
 };
 pub use spgemm::{
-    dense_matmul, spgemm_hash, try_dense_matmul_checked, try_spgemm_checked, try_spgemm_hash,
-    try_spgemm_hash_checked, SpGemmStats,
+    dense_matmul, spgemm_hash, try_dense_matmul_checked, try_spgemm_checked,
+    try_spgemm_checked_with_accumulator, try_spgemm_hash, try_spgemm_hash_checked,
+    try_spgemm_hash_checked_with_options, try_spgemm_hash_with_options, try_spgemm_semiring,
+    PlusTimes, Semiring, SpGemmOptions, SpGemmStats,
 };
 pub use synthetic::{overlap_problem, sparse_output_problem, SyntheticProblem};
