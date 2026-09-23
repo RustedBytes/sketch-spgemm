@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "sketch-spgemm"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "petgraph",
  "sprs",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "sketch-spgemm-python"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "numpy",
  "pyo3",

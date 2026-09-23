@@ -56,7 +56,7 @@ fn splitmix64(mut x: u64) -> u64 {
 /// A has shape r x n, H has shape m x r, result is dense m x n.
 pub fn left_sketch<A>(a: &A, h: &SketchMap) -> DenseMatrix
 where
-    A: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
 {
     assert_eq!(h.domain, a.rows());
     let mut out = DenseMatrix::zeros(h.bucket_count, a.cols());
@@ -76,7 +76,7 @@ where
 /// B has shape n x c, G has shape g x c, result is dense n x g.
 pub fn right_sketch<B>(b: &B, g: &SketchMap) -> DenseMatrix
 where
-    B: CsrInput + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     assert_eq!(g.domain, b.cols());
     let mut out = DenseMatrix::zeros(b.rows(), g.bucket_count);
@@ -100,7 +100,7 @@ where
 /// for the identity H(AB)G^T = (HA)(BG^T).
 pub fn direct_two_sided_sketch<C>(c: &C, h: &SketchMap, g: &SketchMap) -> DenseMatrix
 where
-    C: CsrInput + ?Sized,
+    C: CsrInput<Scalar = i64> + ?Sized,
 {
     assert_eq!(h.domain, c.rows());
     assert_eq!(g.domain, c.cols());

@@ -4,17 +4,19 @@ use crate::auto::{AutoSpGemmConfig, AutoSpGemmStats};
 use crate::error::SpGemmError;
 use crate::matrix::{CsrMatrix, Scalar};
 use petgraph::visit::{EdgeRef, IntoEdges, IntoNodeIdentifiers, NodeIndexable};
+use std::ops::AddAssign;
 
-/// Converts a graph to an `i64` adjacency matrix in canonical CSR form.
+/// Converts a graph to an adjacency matrix in canonical CSR form.
 ///
 /// Rows and columns use [`NodeIndexable::to_index`], and the shape uses
 /// [`NodeIndexable::node_bound`]. This preserves vacant indices in graph types
 /// such as `StableGraph`. Parallel edge weights are summed. For undirected
 /// graphs, `IntoEdges` naturally emits the symmetric adjacency entries.
-pub fn adjacency_csr<G, F>(graph: G, edge_weight: F) -> CsrMatrix
+pub fn adjacency_csr<G, F, T>(graph: G, edge_weight: F) -> CsrMatrix<T>
 where
     G: IntoNodeIdentifiers + IntoEdges + NodeIndexable,
-    F: Fn(&<G::EdgeRef as EdgeRef>::Weight) -> Scalar,
+    F: Fn(&<G::EdgeRef as EdgeRef>::Weight) -> T,
+    T: Copy + Default + PartialEq + AddAssign,
 {
     let node_bound = graph.node_bound();
     let mut triplets = Vec::new();
@@ -22,7 +24,7 @@ where
         let row = graph.to_index(source);
         for edge in graph.edges(source) {
             let value = edge_weight(edge.weight());
-            if value != 0 {
+            if value != T::default() {
                 triplets.push((row, graph.to_index(edge.target()), value));
             }
         }
@@ -98,5 +100,16 @@ mod tests {
         assert_eq!((adjacency.rows, adjacency.cols), (3, 3));
         assert_eq!(adjacency.row(0).collect::<Vec<_>>(), vec![(2, 1)]);
         assert!(adjacency.row(1).next().is_none());
+    }
+
+    #[test]
+    fn adjacency_conversion_is_scalar_generic() {
+        let mut graph = Graph::<(), i32, Directed>::new();
+        let a = graph.add_node(());
+        let b = graph.add_node(());
+        graph.add_edge(a, b, 9);
+
+        let adjacency: CsrMatrix<i32> = adjacency_csr(&graph, |weight| *weight);
+        assert_eq!(adjacency.values, vec![9_i32]);
     }
 }

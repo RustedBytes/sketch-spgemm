@@ -146,8 +146,8 @@ pub fn try_auto_spgemm<A, B>(
     config: AutoSpGemmConfig,
 ) -> Result<(CsrMatrix, AutoSpGemmStats), SpGemmError>
 where
-    A: CsrInput + ?Sized,
-    B: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     if a.cols() != b.rows() {
         return Err(SpGemmError::DimensionMismatch {
@@ -160,8 +160,8 @@ where
 
 fn auto_spgemm_impl<A, B>(a: &A, b: &B, config: AutoSpGemmConfig) -> (CsrMatrix, AutoSpGemmStats)
 where
-    A: CsrInput + ?Sized,
-    B: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     let total_start = Instant::now();
     let (estimate, analysis_timing) = analyze_workload_timed(a, b, &config);
@@ -300,8 +300,8 @@ pub fn try_analyze_workload<A, B>(
     config: &AutoSpGemmConfig,
 ) -> Result<WorkloadEstimate, SpGemmError>
 where
-    A: CsrInput + ?Sized,
-    B: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     if a.cols() != b.rows() {
         return Err(SpGemmError::DimensionMismatch {
@@ -318,8 +318,8 @@ fn analyze_workload_timed<A, B>(
     config: &AutoSpGemmConfig,
 ) -> (WorkloadEstimate, AnalysisTiming)
 where
-    A: CsrInput + ?Sized,
-    B: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     debug_assert_eq!(a.cols(), b.rows());
     let total_start = Instant::now();
@@ -477,8 +477,8 @@ fn estimate_from_sample<A, B>(
     unique_columns: usize,
 ) -> WorkloadEstimate
 where
-    A: CsrInput + ?Sized,
-    B: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     let estimated_output_nnz = if sampled_rows == 0 {
         0
@@ -613,8 +613,8 @@ fn classification_is_confident(e: &WorkloadEstimate, config: &AutoSpGemmConfig) 
 
 pub fn candidate_product_count<A, B>(a: &A, b: &B) -> u128
 where
-    A: CsrInput + ?Sized,
-    B: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     assert_eq!(a.cols(), b.rows());
     let b_degree: Vec<usize> = (0..b.rows()).map(|k| b.row(k).count()).collect();
@@ -634,8 +634,8 @@ fn exact_dispatch<A, B>(
     dense_cell_limit: usize,
 ) -> (CsrMatrix, Option<RectangularStats>, ExactMethod)
 where
-    A: CsrInput + ?Sized,
-    B: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     let dense_cells = a
         .rows()

@@ -542,8 +542,8 @@ pub fn nested_spgemm<A, B>(
     backend: RecoveryBackend,
 ) -> (CsrMatrix, NestedSpGemmStats)
 where
-    A: CsrInput + ?Sized,
-    B: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     nested_spgemm_with_options(a, b, k_bound, backend, NestedOptions::default())
 }
@@ -557,8 +557,8 @@ pub fn nested_spgemm_with_policy<A, B>(
     rectangular_policy: RectangularPolicy,
 ) -> (CsrMatrix, NestedSpGemmStats)
 where
-    A: CsrInput + ?Sized,
-    B: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     nested_spgemm_with_options(
         a,
@@ -584,8 +584,8 @@ pub fn nested_spgemm_with_options<A, B>(
     options: NestedOptions,
 ) -> (CsrMatrix, NestedSpGemmStats)
 where
-    A: CsrInput + ?Sized,
-    B: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     assert_eq!(a.cols(), b.rows(), "incompatible matrix dimensions");
     let r = a.rows();
@@ -1277,7 +1277,7 @@ fn build_recovery_matrix(
 /// Compute H*A for any binary recovery matrix H without materializing H.
 pub fn left_recovery_sketch<A>(a: &A, h: &BinaryRecoveryMatrix) -> DenseMatrix
 where
-    A: CsrInput + ?Sized,
+    A: CsrInput<Scalar = i64> + ?Sized,
 {
     assert_eq!(h.domain(), a.rows());
     if h.is_identity() {
@@ -1302,7 +1302,7 @@ where
 /// Compute B*G^T for any binary recovery matrix G without materializing G.
 pub fn right_recovery_sketch<B>(b: &B, g: &BinaryRecoveryMatrix) -> DenseMatrix
 where
-    B: CsrInput + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     assert_eq!(g.domain(), b.cols());
     if g.is_identity() {
@@ -1334,7 +1334,7 @@ pub fn right_recovery_sketch_masked<B>(
     mask: &[bool],
 ) -> DenseMatrix
 where
-    B: CsrInput + ?Sized,
+    B: CsrInput<Scalar = i64> + ?Sized,
 {
     assert_eq!(g.domain(), b.cols());
     assert_eq!(mask.len(), b.cols());

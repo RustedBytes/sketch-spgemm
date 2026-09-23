@@ -913,6 +913,6 @@ fn py_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAutoSpGemmStats>()?;
     m.add_function(wrap_pyfunction!(auto_spgemm, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_workload, m)?)?;
-    m.add("__version__", "0.9.0")?;
+    m.add("__version__", "0.10.0")?;
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Adaptive, sketch-based sparse matrix multiplication.
 //!
-//! `sketch-spgemm` computes exact integer products `C = A * B` for sparse
-//! matrices. Its high-level [`auto_spgemm`] entry point estimates the workload,
+//! `sketch-spgemm` computes products `C = A * B` for sparse matrices. Its
+//! high-level [`auto_spgemm`] entry point estimates an `i64` workload,
 //! chooses either an exact kernel or compressed moment-sketch recovery, and
 //! verifies recovered candidates with independent residual fingerprints.
 //!
@@ -10,9 +10,11 @@
 //! adjacency and two-hop path-count helpers. See the `interop` module when either
 //! feature is enabled.
 //!
-//! The matrix containers are generic, but the multiplication and recovery
-//! algorithms currently operate on [`Scalar`] (`i64`). Arithmetic overflow
-//! follows Rust's normal integer-overflow behavior.
+//! Matrix containers, [`CsrInput`], [`spgemm_hash`], [`try_spgemm_hash`], and
+//! [`dense_matmul`] are generic over their scalar. Sketch recovery and residual
+//! fingerprints intentionally remain on [`Scalar`] (`i64`) because their
+//! decoding and field mapping require stronger integer semantics. Arithmetic
+//! overflow follows Rust's normal behavior for the selected scalar.
 //!
 //! # Example
 //!
@@ -73,7 +75,10 @@ pub use auto::{
 pub use error::{MatrixOperand, SpGemmError};
 pub use fingerprint::{FingerprintConfig, FingerprintStats, ResidualFingerprint};
 pub use guv::{GuvConfig, GuvError, GuvParameters, GuvRecovery};
-pub use matrix::{CsrInput, CsrMatrix, CsrRowIter, DenseMatrix, Matrix, MatrixLike, Scalar};
+pub use matrix::{
+    CsrInput, CsrMatrix, CsrRowIter, CsrStructureError, CsrView, DenseMatrix, Matrix, MatrixLike,
+    Scalar, SpGemmScalar,
+};
 pub use recovery::{
     left_recovery_sketch, nested_spgemm, nested_spgemm_with_options, nested_spgemm_with_policy,
     right_recovery_sketch, right_recovery_sketch_masked, safe_decode_product, safe_decode_scalar,
@@ -87,5 +92,5 @@ pub use rect::{
 pub use sketch::{
     direct_two_sided_sketch, left_sketch, paper_schedule, right_sketch, RoundParams, SketchMap,
 };
-pub use spgemm::{dense_matmul, spgemm_hash, SpGemmStats};
+pub use spgemm::{dense_matmul, spgemm_hash, try_spgemm_hash, SpGemmStats};
 pub use synthetic::{overlap_problem, sparse_output_problem, SyntheticProblem};

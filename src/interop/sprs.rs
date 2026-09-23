@@ -10,20 +10,20 @@ use crate::matrix::{CsrInput, Scalar};
 use sprs::{CsMatI, CsMatViewI, SpIndex};
 use std::slice;
 
-/// A checked, zero-copy view of a `sprs` CSR matrix with `i64` values.
+/// A checked, zero-copy view of a `sprs` CSR matrix.
 #[derive(Clone, Debug)]
-pub struct SprsCsrView<'a, I: SpIndex = usize, Iptr: SpIndex = I> {
-    matrix: CsMatViewI<'a, Scalar, I, Iptr>,
+pub struct SprsCsrView<'a, N = Scalar, I: SpIndex = usize, Iptr: SpIndex = I> {
+    matrix: CsMatViewI<'a, N, I, Iptr>,
 }
 
-impl<'a, I, Iptr> SprsCsrView<'a, I, Iptr>
+impl<'a, N, I, Iptr> SprsCsrView<'a, N, I, Iptr>
 where
     I: SpIndex,
     Iptr: SpIndex,
 {
     /// Wraps a borrowed `sprs` matrix, rejecting column-compressed storage.
     pub fn try_new(
-        matrix: CsMatViewI<'a, Scalar, I, Iptr>,
+        matrix: CsMatViewI<'a, N, I, Iptr>,
         operand: MatrixOperand,
     ) -> Result<Self, SpGemmError> {
         if !matrix.is_csr() {
@@ -33,20 +33,24 @@ where
     }
 
     /// Returns the underlying borrowed `sprs` matrix.
-    pub fn as_inner(&self) -> &CsMatViewI<'a, Scalar, I, Iptr> {
+    pub fn as_inner(&self) -> &CsMatViewI<'a, N, I, Iptr> {
         &self.matrix
     }
 }
 
 /// Iterator over one borrowed `sprs` row.
 #[derive(Clone, Debug)]
-pub struct SprsRowIter<'a, I: SpIndex> {
+pub struct SprsRowIter<'a, N, I: SpIndex> {
     columns: slice::Iter<'a, I>,
-    values: slice::Iter<'a, Scalar>,
+    values: slice::Iter<'a, N>,
 }
 
-impl<I: SpIndex> Iterator for SprsRowIter<'_, I> {
-    type Item = (usize, Scalar);
+impl<N, I> Iterator for SprsRowIter<'_, N, I>
+where
+    N: Copy + Default + PartialEq,
+    I: SpIndex,
+{
+    type Item = (usize, N);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -54,20 +58,22 @@ impl<I: SpIndex> Iterator for SprsRowIter<'_, I> {
             let &value = self.values.next()?;
             // Explicit zeros are legal in sprs but not in CsrInput. Skipping
             // them retains zero-copy access and canonical logical rows.
-            if value != 0 {
+            if value != N::default() {
                 return Some((column.index(), value));
             }
         }
     }
 }
 
-impl<I, Iptr> CsrInput for SprsCsrView<'_, I, Iptr>
+impl<N, I, Iptr> CsrInput for SprsCsrView<'_, N, I, Iptr>
 where
+    N: Copy + Default + PartialEq,
     I: SpIndex,
     Iptr: SpIndex,
 {
+    type Scalar = N;
     type RowIter<'a>
-        = SprsRowIter<'a, I>
+        = SprsRowIter<'a, N, I>
     where
         Self: 'a;
 
@@ -83,7 +89,7 @@ where
         self.matrix
             .data()
             .iter()
-            .filter(|&&value| value != 0)
+            .filter(|&&value| value != N::default())
             .count()
     }
 
@@ -178,5 +184,16 @@ mod tests {
         let view = SprsCsrView::try_new(csr.view(), MatrixOperand::Left).unwrap();
         assert_eq!(view.nnz(), 1);
         assert_eq!(view.row(0).collect::<Vec<_>>(), vec![(1, 9)]);
+    }
+
+    #[test]
+    fn generic_view_supports_exact_i32_kernel() {
+        let left = CsMatI::<i32, u16>::new((1, 2), vec![0, 2], vec![0, 1], vec![2, 3]);
+        let right = CsMatI::<i32, u16>::new((2, 1), vec![0, 1, 2], vec![0, 0], vec![5, 7]);
+        let left = SprsCsrView::try_new(left.view(), MatrixOperand::Left).unwrap();
+        let right = SprsCsrView::try_new(right.view(), MatrixOperand::Right).unwrap();
+
+        let (product, _) = crate::try_spgemm_hash(&left, &right).unwrap();
+        assert_eq!(product.values, vec![31_i32]);
     }
 }

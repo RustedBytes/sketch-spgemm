@@ -47,8 +47,8 @@ pub struct ResidualFingerprint {
 impl ResidualFingerprint {
     pub fn new<A, B>(a: &A, b: &B, config: FingerprintConfig) -> Self
     where
-        A: CsrInput + ?Sized,
-        B: CsrInput + ?Sized,
+        A: CsrInput<Scalar = i64> + ?Sized,
+        B: CsrInput<Scalar = i64> + ?Sized,
     {
         assert_eq!(a.cols(), b.rows());
         let lanes = config.lanes.max(1);
@@ -120,7 +120,7 @@ impl ResidualFingerprint {
 
     pub fn fingerprint<D>(&self, d: &D) -> Vec<u64>
     where
-        D: CsrInput + ?Sized,
+        D: CsrInput<Scalar = i64> + ?Sized,
     {
         assert_eq!(d.rows(), self.row_weights[0].len());
         assert_eq!(d.cols(), self.col_weights[0].len());
@@ -144,7 +144,7 @@ impl ResidualFingerprint {
     #[inline]
     pub fn verifies<D>(&self, d: &D) -> bool
     where
-        D: CsrInput + ?Sized,
+        D: CsrInput<Scalar = i64> + ?Sized,
     {
         self.fingerprint(d) == self.target
     }

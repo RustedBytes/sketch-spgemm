@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
-use std::ops::{AddAssign, Index, IndexMut};
+use std::error::Error;
+use std::fmt;
+use std::ops::{AddAssign, Index, IndexMut, Mul};
 use std::slice;
 
 /// Exact scalar used by the sketch, recovery, and fingerprint algorithms.
@@ -16,8 +18,11 @@ pub type Scalar = i64;
 /// must equal the total number of yielded entries. Algorithms may rely on
 /// these invariants without rescanning the complete input.
 pub trait CsrInput {
+    /// Scalar stored by the matrix.
+    type Scalar: Copy;
+
     /// Iterator returned for a borrowed matrix row.
-    type RowIter<'a>: Iterator<Item = (usize, Scalar)>
+    type RowIter<'a>: Iterator<Item = (usize, Self::Scalar)>
     where
         Self: 'a;
 
@@ -38,7 +43,10 @@ pub trait CsrInput {
     fn row(&self, row: usize) -> Self::RowIter<'_>;
 
     /// Materialize this sparse input as a row-major dense matrix.
-    fn to_dense(&self) -> DenseMatrix {
+    fn to_dense(&self) -> DenseMatrix<Self::Scalar>
+    where
+        Self::Scalar: Default,
+    {
         let mut dense = DenseMatrix::zeros(self.rows(), self.cols());
         for row in 0..self.rows() {
             for (column, value) in self.row(row) {
@@ -49,15 +57,15 @@ pub trait CsrInput {
     }
 }
 
-/// Borrowing row iterator for [`CsrMatrix<i64>`].
+/// Borrowing row iterator for [`CsrMatrix`] and [`CsrView`].
 #[derive(Clone, Debug)]
-pub struct CsrRowIter<'a> {
+pub struct CsrRowIter<'a, T = Scalar> {
     columns: slice::Iter<'a, usize>,
-    values: slice::Iter<'a, Scalar>,
+    values: slice::Iter<'a, T>,
 }
 
-impl Iterator for CsrRowIter<'_> {
-    type Item = (usize, Scalar);
+impl<T: Copy> Iterator for CsrRowIter<'_, T> {
+    type Item = (usize, T);
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -73,7 +81,161 @@ impl Iterator for CsrRowIter<'_> {
     }
 }
 
-impl ExactSizeIterator for CsrRowIter<'_> {}
+impl<T: Copy> ExactSizeIterator for CsrRowIter<'_, T> {}
+
+/// Error returned when borrowed CSR buffers are not canonical.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CsrStructureError {
+    reason: String,
+}
+
+impl CsrStructureError {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    /// Human-readable validation failure.
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+impl fmt::Display for CsrStructureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid canonical CSR buffers: {}", self.reason)
+    }
+}
+
+impl Error for CsrStructureError {}
+
+/// Checked zero-copy view over canonical CSR buffers.
+///
+/// This adapter is useful for external matrix types that expose ordinary
+/// `usize` index buffers but cannot implement this crate's trait directly.
+#[derive(Clone, Copy, Debug)]
+pub struct CsrView<'a, T = Scalar> {
+    rows: usize,
+    cols: usize,
+    row_ptr: &'a [usize],
+    col_idx: &'a [usize],
+    values: &'a [T],
+}
+
+impl<'a, T> CsrView<'a, T>
+where
+    T: Copy + Default + PartialEq,
+{
+    /// Validate and borrow CSR buffers without copying them.
+    pub fn try_new(
+        rows: usize,
+        cols: usize,
+        row_ptr: &'a [usize],
+        col_idx: &'a [usize],
+        values: &'a [T],
+    ) -> Result<Self, CsrStructureError> {
+        if row_ptr.len() != rows + 1 {
+            return Err(CsrStructureError::new(format!(
+                "row_ptr has length {}, expected {}",
+                row_ptr.len(),
+                rows + 1
+            )));
+        }
+        if col_idx.len() != values.len() {
+            return Err(CsrStructureError::new(format!(
+                "col_idx has length {}, values has length {}",
+                col_idx.len(),
+                values.len()
+            )));
+        }
+        if row_ptr.first().copied() != Some(0) {
+            return Err(CsrStructureError::new("row_ptr must start at zero"));
+        }
+        if row_ptr.last().copied() != Some(values.len()) {
+            return Err(CsrStructureError::new(
+                "final row pointer must equal the number of values",
+            ));
+        }
+
+        let zero = T::default();
+        for row in 0..rows {
+            let start = row_ptr[row];
+            let end = row_ptr[row + 1];
+            if start > end || end > values.len() {
+                return Err(CsrStructureError::new(format!(
+                    "invalid pointer range {start}..{end} for row {row}"
+                )));
+            }
+            let mut previous = None;
+            for position in start..end {
+                let column = col_idx[position];
+                if column >= cols {
+                    return Err(CsrStructureError::new(format!(
+                        "column {column} in row {row} is outside 0..{cols}"
+                    )));
+                }
+                if previous.is_some_and(|value| value >= column) {
+                    return Err(CsrStructureError::new(format!(
+                        "columns in row {row} are not strictly increasing"
+                    )));
+                }
+                if values[position] == zero {
+                    return Err(CsrStructureError::new(format!(
+                        "explicit zero at position {position}"
+                    )));
+                }
+                previous = Some(column);
+            }
+        }
+
+        Ok(Self {
+            rows,
+            cols,
+            row_ptr,
+            col_idx,
+            values,
+        })
+    }
+}
+
+impl<T: Copy> CsrInput for CsrView<'_, T> {
+    type Scalar = T;
+    type RowIter<'a>
+        = CsrRowIter<'a, T>
+    where
+        Self: 'a;
+
+    fn rows(&self) -> usize {
+        self.rows
+    }
+
+    fn cols(&self) -> usize {
+        self.cols
+    }
+
+    fn nnz(&self) -> usize {
+        self.values.len()
+    }
+
+    fn row(&self, row: usize) -> Self::RowIter<'_> {
+        let start = self.row_ptr[row];
+        let end = self.row_ptr[row + 1];
+        CsrRowIter {
+            columns: self.col_idx[start..end].iter(),
+            values: self.values[start..end].iter(),
+        }
+    }
+}
+
+/// Scalar operations required by the representation-independent exact kernels.
+///
+/// `Default::default()` is interpreted as additive zero. This deliberately
+/// keeps the exact baseline independent from the stronger integer assumptions
+/// made by sketch recovery and residual fingerprints.
+pub trait SpGemmScalar: Copy + Default + PartialEq + AddAssign + Mul<Output = Self> {}
+
+impl<T> SpGemmScalar for T where T: Copy + Default + PartialEq + AddAssign + Mul<Output = Self> {}
 
 /// Representation-independent matrix metadata.
 ///
@@ -183,6 +345,48 @@ where
         }
     }
 
+    /// Convert canonical or non-canonical CSC buffers into canonical CSR.
+    ///
+    /// Rows within a column may be unsorted and duplicated; duplicates are
+    /// summed and resulting zeros are removed, just as in [`Self::from_triplets`].
+    /// This conversion allocates because row-oriented kernels cannot traverse
+    /// CSC storage efficiently in place.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the pointer/data lengths are inconsistent, pointers are not
+    /// monotonic, or a row index is outside `0..rows`.
+    pub fn from_csc(
+        rows: usize,
+        cols: usize,
+        col_ptr: &[usize],
+        row_idx: &[usize],
+        values: &[T],
+    ) -> Self {
+        assert_eq!(col_ptr.len(), cols + 1, "CSC column-pointer length");
+        assert_eq!(row_idx.len(), values.len(), "CSC index/value lengths");
+        assert_eq!(col_ptr[0], 0, "CSC column pointers must start at zero");
+        assert_eq!(
+            col_ptr[cols],
+            values.len(),
+            "CSC final column pointer must equal nnz"
+        );
+
+        let mut triplets = Vec::with_capacity(values.len());
+        for column in 0..cols {
+            let start = col_ptr[column];
+            let end = col_ptr[column + 1];
+            assert!(start <= end, "CSC column pointers must be monotonic");
+            assert!(end <= values.len(), "CSC column pointer exceeds nnz");
+            for position in start..end {
+                let row = row_idx[position];
+                assert!(row < rows, "CSC row {row} out of range {rows}");
+                triplets.push((row, column, values[position]));
+            }
+        }
+        Self::from_triplets(rows, cols, &triplets)
+    }
+
     pub fn to_dense(&self) -> DenseMatrix<T> {
         let mut out = DenseMatrix::zeros(self.rows, self.cols);
         for r in 0..self.rows {
@@ -213,8 +417,12 @@ impl<T> MatrixLike for CsrMatrix<T> {
     }
 }
 
-impl CsrInput for CsrMatrix<Scalar> {
-    type RowIter<'a> = CsrRowIter<'a>;
+impl<T: Copy> CsrInput for CsrMatrix<T> {
+    type Scalar = T;
+    type RowIter<'a>
+        = CsrRowIter<'a, T>
+    where
+        T: 'a;
 
     #[inline]
     fn rows(&self) -> usize {
@@ -481,5 +689,30 @@ mod tests {
         assert_eq!(matrix.nnz(), 2);
         assert!(matrix.as_csr().is_some());
         assert_eq!(matrix.into_dense().data, vec![2, 0, 0, 5]);
+    }
+
+    #[test]
+    fn csc_conversion_sorts_rows_combines_duplicates_and_removes_zeros() {
+        let csr = CsrMatrix::<i32>::from_csc(2, 2, &[0, 3, 4], &[1, 0, 1, 0], &[2, 5, -2, 7]);
+        assert_eq!(csr.row_ptr, vec![0, 2, 2]);
+        assert_eq!(csr.col_idx, vec![0, 1]);
+        assert_eq!(csr.values, vec![5, 7]);
+    }
+
+    #[test]
+    fn checked_csr_view_is_zero_copy_and_scalar_generic() {
+        let row_ptr = [0, 2, 3];
+        let col_idx = [0, 2, 1];
+        let values = [2_i32, 3, 4];
+        let view = CsrView::try_new(2, 3, &row_ptr, &col_idx, &values).unwrap();
+
+        assert_eq!(view.row(0).collect::<Vec<_>>(), vec![(0, 2), (2, 3)]);
+        assert_eq!(view.to_dense().data, vec![2, 0, 3, 0, 4, 0]);
+    }
+
+    #[test]
+    fn checked_csr_view_rejects_noncanonical_rows() {
+        let error = CsrView::try_new(1, 3, &[0, 2], &[2, 1], &[4_i32, 5]).unwrap_err();
+        assert!(error.reason().contains("strictly increasing"));
     }
 }

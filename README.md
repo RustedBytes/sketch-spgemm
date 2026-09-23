@@ -19,9 +19,9 @@ while its practical path uses an IBLT-style moment recovery strategy rather
 than being a literal implementation of the deterministic theorem.
 
 > [!IMPORTANT]
-> The matrix containers are generic, but the current multiplication, recovery,
-> and fingerprint algorithms use exact `i64` arithmetic. This is not a general
-> tensor library, GPU kernel, or LLM inference engine. See
+> Matrix containers and direct multiplication kernels are scalar-generic.
+> Automatic sketch recovery and fingerprints use exact `i64` arithmetic. This
+> is not a general tensor library, GPU kernel, or LLM inference engine. See
 > [Limitations](#limitations).
 
 ## Why SketchSpGEMM?
@@ -179,17 +179,24 @@ For borrowed CSR implementations, use the fallible generic entry point:
 ```rust
 use sketch_spgemm::{try_auto_spgemm, AutoSpGemmConfig, CsrInput};
 
-fn multiply<A: CsrInput, B: CsrInput>(a: &A, b: &B) {
+fn multiply<A, B>(a: &A, b: &B)
+where
+    A: CsrInput<Scalar = i64>,
+    B: CsrInput<Scalar = i64>,
+{
     let (product, stats) =
         try_auto_spgemm(a, b, AutoSpGemmConfig::default()).unwrap();
     println!("{} nonzeros via {:?}", product.nnz(), stats.choice);
 }
 ```
 
-`CsrInput` is fixed to the algorithms' `i64` scalar and requires canonical
-CSR rows: sorted unique columns and no explicit zeros. It lets external sparse
-containers participate without first copying their complete input into
-`CsrMatrix`.
+`CsrInput` has an associated scalar type and requires canonical CSR rows:
+sorted unique columns and no explicit zeros. It lets external sparse containers
+participate without first copying their complete input into `CsrMatrix`.
+`try_auto_spgemm` requires `Scalar = i64`; other scalar types use the direct
+`try_spgemm_hash` kernel described below.
+External containers exposing `usize` CSR buffers can use the checked,
+zero-copy `CsrView` adapter instead of defining a dedicated wrapper.
 
 ## Ecosystem integrations
 
@@ -226,12 +233,12 @@ adapter overhead.
 
 ### `sprs`
 
-The `sprs` feature accepts borrowed `CsMatViewI<'_, i64, I, Iptr>` operands and
-returns an owning `CsMatI<i64, I, Iptr>`. Input values, indices, and row pointers
-are read in place; CSC is rejected because converting it would violate the
-zero-copy CSR contract. Explicit stored zeros are ignored. The inputs must use
-the same `sprs` index types, and an output index overflow is reported as an
-error.
+The `sprs` feature provides a generic `SprsCsrView<'_, T, I, Iptr>` for borrowed
+CSR operands. It can be passed directly to generic direct kernels without
+copying input values, indices, or row pointers. The `sprs::auto_spgemm`
+convenience function remains specialized to `i64` and returns an owning
+`CsMatI<i64, I, Iptr>`. CSC is rejected because converting it would violate the
+zero-copy CSR contract. Explicit stored zeros are ignored.
 
 ```rust
 use sketch_spgemm::AutoSpGemmConfig;
@@ -310,7 +317,31 @@ assert_eq!(exact_value, 7);
   representation.
 - `MatrixLike` exposes shared `rows`, `cols`, `shape`, and `nnz`
   metadata.
-- `Scalar` is the `i64` type used by the current algorithms.
+- `CsrInput::Scalar` identifies the value type exposed by a borrowed CSR input.
+- `SpGemmScalar` is the minimal scalar contract for direct sparse and dense
+  multiplication.
+- `Scalar` is the `i64` type used by automatic sketch recovery and fingerprints.
+
+COO input can be canonicalized with `CsrMatrix::from_triplets`. CSC buffers can
+be converted once with `CsrMatrix::from_csc`; the conversion is intentionally
+allocating because all sparse kernels use row-oriented access.
+
+Generic direct multiplication accepts any numeric type satisfying
+`SpGemmScalar`, including integer and floating-point primitives:
+
+```rust
+use sketch_spgemm::{try_spgemm_hash, CsrMatrix};
+
+let a = CsrMatrix::<i32>::from_triplets(1, 2, &[(0, 0, 2), (0, 1, 3)]);
+let b = CsrMatrix::<i32>::from_triplets(2, 1, &[(0, 0, 5), (1, 0, 7)]);
+let (c, _) = try_spgemm_hash(&a, &b)?;
+assert_eq!(c.values, vec![31]);
+# Ok::<(), sketch_spgemm::SpGemmError>(())
+```
+
+Here "direct" means that no probabilistic sketch is used. Floating-point
+results retain the usual rounding, NaN, and signed-zero semantics of their Rust
+primitive type.
 
 Kernels continue to accept concrete dense or CSR types so representation
 dispatch happens outside performance-sensitive inner loops.
@@ -457,10 +488,21 @@ nested_spgemm_with_policy(...)     custom rectangular policy
 nested_spgemm_with_options(...)    engineering controls
 adaptive_matmul(...)               one-shot rectangular multiplication
 adaptive_matmul_prepared(...)      cached-factor rectangular multiplication
-spgemm_hash(...)                   exact CSR baseline
+spgemm_hash(...)                   direct CSR baseline
+try_spgemm_hash(...)               fallible scalar-generic CSR baseline
 ```
 
-## What's new in v0.9.0
+## What's new in v0.10.0
+
+- Scalar-generic `CsrInput`, `spgemm_hash`, `try_spgemm_hash`, and
+  `dense_matmul` APIs.
+- Checked zero-copy `CsrView` support for external CSR buffers.
+- Explicit CSC-to-CSR conversion with `CsrMatrix::from_csc`.
+- Scalar-generic borrowed `sprs` views and `petgraph` adjacency conversion.
+- Automatic sketch recovery remains deliberately specialized to exact `i64`
+  arithmetic.
+
+Changes introduced in v0.9.0 included:
 
 - Optional zero-copy `sprs` CSR input and native-output integration.
 - Optional weighted `petgraph` adjacency and two-hop path-count integration.
@@ -479,8 +521,8 @@ spgemm_hash(...)                   exact CSR baseline
 
 ## Limitations
 
-- The matrix containers are generic, but multiplication, recovery, and
-  fingerprint APIs currently operate on exact signed 64-bit integers.
+- Automatic sketch recovery and fingerprint APIs currently operate on exact
+  signed 64-bit integers. Other scalar types use the direct kernels.
 - Arithmetic overflow is not converted into a recoverable error.
 - Execution is CPU-only and currently single-process.
 - There are no CUDA, Metal, or distributed integrations.
