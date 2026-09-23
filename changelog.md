@@ -18,6 +18,10 @@ series. Breaking public API changes may therefore appear in minor releases.
   row-major `CsrBuilder` with checked duplicate aggregation.
 - Python `checked_spgemm`, `SpGemmStats`, `CsrBuilder`, and
   `CsrMatrix.from_triplets` bindings with NumPy input and mapped Python errors.
+- Python CSR matrices, streaming construction, and checked multiplication now
+  preserve `int32`, `int64`, `float32`, and `float64` NumPy dtypes. The sketch
+  selector remains intentionally restricted to `int64`.
+- Ruff formatting/linting and Pyright type checking are enforced by Python CI.
 
 ### Changed
 

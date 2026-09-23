@@ -2,7 +2,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
-
 import sketch_spgemm as ssg
 
 
@@ -51,6 +50,88 @@ def test_checked_product_and_overflow(operands):
     multiplier = csr([2], [0], [0, 1], (1, 1))
     with pytest.raises(OverflowError, match="multiplication"):
         ssg.checked_spgemm(overflowing_left, multiplier)
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.int64, np.float32, np.float64])
+def test_supported_matrix_dtypes(dtype):
+    data = np.asarray([2, 3, 4], dtype=dtype)
+    left = ssg.CsrMatrix(
+        data,
+        np.asarray([0, 1, 1], dtype=np.int64),
+        np.asarray([0, 2, 3], dtype=np.int64),
+        (2, 2),
+    )
+    right = ssg.CsrMatrix.from_triplets(
+        np.asarray([5, 7, 11], dtype=dtype),
+        np.asarray([0, 1, 1], dtype=np.int64),
+        np.asarray([0, 0, 1], dtype=np.int64),
+        (2, 2),
+    )
+
+    product, stats = ssg.checked_spgemm(left, right)
+    assert left.dtype == np.dtype(dtype).name
+    assert product.dtype == np.dtype(dtype).name
+    assert product.to_dense().dtype == dtype
+    assert product.to_arrays()[0].dtype == dtype
+    np.testing.assert_allclose(product.to_dense(), [[31, 33], [28, 44]])
+    assert stats.candidate_products == 5
+
+
+@pytest.mark.parametrize("dtype", ["int32", "int64", "float32", "float64"])
+def test_streaming_builder_preserves_dtype(dtype):
+    numpy_dtype = np.dtype(dtype)
+    builder = ssg.CsrBuilder(2, 2, dtype=dtype)
+    assert builder.dtype == dtype
+    builder.extend(
+        np.asarray([2, 3], dtype=numpy_dtype),
+        np.asarray([0, 1], dtype=np.int64),
+        np.asarray([0, 1], dtype=np.int64),
+    )
+    builder.push(1, 1, 1.5 if dtype.startswith("float") else 1)
+    matrix = builder.finish()
+    assert builder.dtype == dtype
+    assert matrix.dtype == dtype
+    assert matrix.to_dense().dtype == numpy_dtype
+    np.testing.assert_allclose(
+        matrix.to_dense(), [[2, 0], [0, 4.5 if dtype.startswith("float") else 4]]
+    )
+
+
+def test_dtype_validation_and_algorithm_boundaries():
+    indices = np.asarray([0], dtype=np.int64)
+    indptr = np.asarray([0, 1], dtype=np.int64)
+    with pytest.raises(TypeError, match="data dtype"):
+        ssg.CsrMatrix(
+            np.asarray([1], dtype=np.uint64),  # pyright: ignore[reportArgumentType]
+            indices,
+            indptr,
+            (1, 1),
+        )
+
+    int_matrix = ssg.CsrMatrix(np.asarray([1], dtype=np.int32), indices, indptr, (1, 1))
+    float_matrix = ssg.CsrMatrix(np.asarray([1], dtype=np.float32), indices, indptr, (1, 1))
+    with pytest.raises(TypeError, match="same dtype"):
+        ssg.checked_spgemm(int_matrix, float_matrix)
+    with pytest.raises(TypeError, match="requires int64"):
+        ssg.auto_spgemm(float_matrix, float_matrix)
+
+
+def test_int32_checked_overflow():
+    maximum = np.iinfo(np.int32).max
+    left = ssg.CsrMatrix.from_triplets(
+        np.asarray([maximum], dtype=np.int32),
+        np.asarray([0], dtype=np.int64),
+        np.asarray([0], dtype=np.int64),
+        (1, 1),
+    )
+    right = ssg.CsrMatrix.from_triplets(
+        np.asarray([2], dtype=np.int32),
+        np.asarray([0], dtype=np.int64),
+        np.asarray([0], dtype=np.int64),
+        (1, 1),
+    )
+    with pytest.raises(OverflowError, match="multiplication"):
+        ssg.checked_spgemm(left, right)
 
 
 def test_csr_from_unsorted_triplets():
@@ -117,7 +198,7 @@ def test_analyze_and_immutable_configuration(operands):
     assert config.moment.degree == 4
     assert config.fingerprint.seed == 13
     with pytest.raises(AttributeError):
-        config.sample_rows = 99
+        config.sample_rows = 99  # pyright: ignore[reportAttributeAccessIssue]
 
 
 @pytest.mark.parametrize(
@@ -140,7 +221,7 @@ def test_rejects_noncanonical_csr(data, indices, indptr, shape, message):
 def test_rejects_wrong_dtype_and_noncontiguous_arrays():
     with pytest.raises(TypeError):
         ssg.CsrMatrix(
-            np.asarray([1], dtype=np.int32),
+            np.asarray([1], dtype=np.uint16),  # pyright: ignore[reportArgumentType]
             np.asarray([0], dtype=np.int64),
             np.asarray([0, 1], dtype=np.int64),
             (1, 1),
@@ -223,7 +304,9 @@ def test_configuration_validation():
     with pytest.raises(ValueError, match="between 0.0 and 1.0"):
         ssg.AutoSpGemmConfig(max_estimated_output_density=2.0)
     with pytest.raises(ValueError, match="rectangular_policy"):
-        ssg.AutoSpGemmConfig(rectangular_policy="unknown")
+        ssg.AutoSpGemmConfig(
+            rectangular_policy="unknown"  # pyright: ignore[reportArgumentType]
+        )
     with pytest.raises(ValueError, match="degree"):
         ssg.MomentConfig(degree=0)
     with pytest.raises(ValueError, match="lanes"):

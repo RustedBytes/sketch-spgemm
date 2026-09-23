@@ -1,17 +1,15 @@
 #![forbid(unsafe_code)]
 
 use numpy::ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
-use pyo3::exceptions::{PyOverflowError, PyRuntimeError, PyValueError};
+use numpy::{Element, IntoPyArray, PyReadonlyArray1};
+use pyo3::exceptions::{PyOverflowError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyAny;
 use sketch_spgemm as core;
+use std::ops::AddAssign;
 use std::sync::Arc;
 
-type CsrArrays<'py> = (
-    Bound<'py, PyArray1<i64>>,
-    Bound<'py, PyArray1<i64>>,
-    Bound<'py, PyArray1<i64>>,
-);
+type PyCsrArrays = (Py<PyAny>, Py<PyAny>, Py<PyAny>);
 
 fn value_error(message: impl Into<String>) -> PyErr {
     PyValueError::new_err(message.into())
@@ -34,11 +32,14 @@ fn map_build_error(error: core::CsrBuildError) -> PyErr {
     }
 }
 
-fn collect_triplets(
-    data: PyReadonlyArray1<'_, i64>,
+fn collect_triplets<T>(
+    data: PyReadonlyArray1<'_, T>,
     row_indices: PyReadonlyArray1<'_, i64>,
     column_indices: PyReadonlyArray1<'_, i64>,
-) -> PyResult<Vec<(usize, usize, i64)>> {
+) -> PyResult<Vec<(usize, usize, T)>>
+where
+    T: Element + Copy,
+{
     let data = data
         .as_slice()
         .map_err(|_| value_error("data must be a contiguous one-dimensional array"))?;
@@ -63,6 +64,136 @@ fn collect_triplets(
         ));
     }
     Ok(triplets)
+}
+
+fn csr_from_arrays<T>(
+    data: PyReadonlyArray1<'_, T>,
+    indices: PyReadonlyArray1<'_, i64>,
+    indptr: PyReadonlyArray1<'_, i64>,
+    shape: (usize, usize),
+) -> PyResult<core::CsrMatrix<T>>
+where
+    T: Element + Copy + Default + PartialEq,
+{
+    let data = data
+        .as_slice()
+        .map_err(|_| value_error("data must be a contiguous one-dimensional array"))?;
+    let indices = indices
+        .as_slice()
+        .map_err(|_| value_error("indices must be a contiguous one-dimensional array"))?;
+    let indptr = indptr
+        .as_slice()
+        .map_err(|_| value_error("indptr must be a contiguous one-dimensional array"))?;
+
+    let (rows, cols) = shape;
+    if rows > i64::MAX as usize || cols > i64::MAX as usize {
+        return Err(PyOverflowError::new_err(
+            "shape dimensions must fit in signed 64-bit integers",
+        ));
+    }
+    if data.len() > i64::MAX as usize {
+        return Err(PyOverflowError::new_err(
+            "the number of stored values must fit in a signed 64-bit integer",
+        ));
+    }
+    if data.len() != indices.len() {
+        return Err(value_error("data and indices must have equal lengths"));
+    }
+    let expected_indptr = rows
+        .checked_add(1)
+        .ok_or_else(|| PyOverflowError::new_err("row count is too large"))?;
+    if indptr.len() != expected_indptr {
+        return Err(value_error(format!(
+            "indptr length must equal rows + 1 ({expected_indptr})"
+        )));
+    }
+    if indptr.first().copied() != Some(0) {
+        return Err(value_error("indptr must start at zero"));
+    }
+
+    let mut row_ptr = Vec::with_capacity(indptr.len());
+    let mut previous = 0usize;
+    for (position, &pointer) in indptr.iter().enumerate() {
+        let pointer = usize::try_from(pointer)
+            .map_err(|_| value_error(format!("indptr[{position}] must be non-negative")))?;
+        if pointer < previous {
+            return Err(value_error("indptr must be monotonically non-decreasing"));
+        }
+        if pointer > data.len() {
+            return Err(value_error("indptr entries cannot exceed nnz"));
+        }
+        row_ptr.push(pointer);
+        previous = pointer;
+    }
+    if previous != data.len() {
+        return Err(value_error("the final indptr entry must equal nnz"));
+    }
+
+    let mut col_idx = Vec::with_capacity(indices.len());
+    for (position, &column) in indices.iter().enumerate() {
+        let column = usize::try_from(column)
+            .map_err(|_| value_error(format!("indices[{position}] must be non-negative")))?;
+        if column >= cols {
+            return Err(value_error(format!(
+                "indices[{position}]={column} is outside matrix width {cols}"
+            )));
+        }
+        col_idx.push(column);
+    }
+
+    let zero = T::default();
+    for row in 0..rows {
+        let start = row_ptr[row];
+        let end = row_ptr[row + 1];
+        for position in start..end {
+            if data[position] == zero {
+                return Err(value_error(format!(
+                    "explicit zero at data[{position}] is not canonical CSR"
+                )));
+            }
+            if position > start && col_idx[position - 1] >= col_idx[position] {
+                return Err(value_error(format!(
+                    "column indices in row {row} must be strictly increasing"
+                )));
+            }
+        }
+    }
+
+    Ok(core::CsrMatrix {
+        rows,
+        cols,
+        row_ptr,
+        col_idx,
+        values: data.to_vec(),
+    })
+}
+
+fn extend_builder<T>(
+    builder: &mut core::CsrBuilder<T>,
+    data: PyReadonlyArray1<'_, T>,
+    row_indices: PyReadonlyArray1<'_, i64>,
+    column_indices: PyReadonlyArray1<'_, i64>,
+) -> PyResult<()>
+where
+    T: Element + Copy + Default + PartialEq + core::CheckedAddScalar,
+{
+    let triplets = collect_triplets(data, row_indices, column_indices)?;
+    builder.try_extend(triplets).map_err(map_build_error)?;
+    Ok(())
+}
+
+fn dtype_error() -> PyErr {
+    PyTypeError::new_err("data dtype must be one of: int32, int64, float32, float64")
+}
+
+fn parse_dtype(dtype: &str) -> PyResult<&'static str> {
+    match dtype {
+        "int32" | "i32" => Ok("int32"),
+        "int64" | "i64" => Ok("int64"),
+        "float32" | "f32" => Ok("float32"),
+        "float64" | "f64" => Ok("float64"),
+        _ => Err(dtype_error()),
+    }
 }
 
 fn finite_nonnegative(name: &str, value: f64) -> PyResult<()> {
@@ -115,16 +246,114 @@ fn rectangular_kernel_name(value: core::RectangularKernel) -> &'static str {
     }
 }
 
-/// Immutable canonical CSR matrix with signed 64-bit values.
+#[derive(Clone)]
+enum CsrStorage {
+    I32(Arc<core::CsrMatrix<i32>>),
+    I64(Arc<core::CsrMatrix<i64>>),
+    F32(Arc<core::CsrMatrix<f32>>),
+    F64(Arc<core::CsrMatrix<f64>>),
+}
+
+impl CsrStorage {
+    fn rows(&self) -> usize {
+        match self {
+            Self::I32(matrix) => matrix.rows,
+            Self::I64(matrix) => matrix.rows,
+            Self::F32(matrix) => matrix.rows,
+            Self::F64(matrix) => matrix.rows,
+        }
+    }
+
+    fn cols(&self) -> usize {
+        match self {
+            Self::I32(matrix) => matrix.cols,
+            Self::I64(matrix) => matrix.cols,
+            Self::F32(matrix) => matrix.cols,
+            Self::F64(matrix) => matrix.cols,
+        }
+    }
+
+    fn nnz(&self) -> usize {
+        match self {
+            Self::I32(matrix) => matrix.nnz(),
+            Self::I64(matrix) => matrix.nnz(),
+            Self::F32(matrix) => matrix.nnz(),
+            Self::F64(matrix) => matrix.nnz(),
+        }
+    }
+
+    fn dtype(&self) -> &'static str {
+        match self {
+            Self::I32(_) => "int32",
+            Self::I64(_) => "int64",
+            Self::F32(_) => "float32",
+            Self::F64(_) => "float64",
+        }
+    }
+}
+
+fn arrays_to_python<T>(py: Python<'_>, matrix: &core::CsrMatrix<T>) -> PyCsrArrays
+where
+    T: Element + Clone,
+{
+    let data = matrix.values.clone().into_pyarray(py).into_any().unbind();
+    let indices = matrix
+        .col_idx
+        .iter()
+        .map(|&value| value as i64)
+        .collect::<Vec<_>>()
+        .into_pyarray(py)
+        .into_any()
+        .unbind();
+    let indptr = matrix
+        .row_ptr
+        .iter()
+        .map(|&value| value as i64)
+        .collect::<Vec<_>>()
+        .into_pyarray(py)
+        .into_any()
+        .unbind();
+    (data, indices, indptr)
+}
+
+fn dense_to_python<T>(py: Python<'_>, matrix: &core::CsrMatrix<T>) -> PyResult<Py<PyAny>>
+where
+    T: Element + Copy + Default + PartialEq + AddAssign,
+{
+    let dense = matrix.to_dense();
+    let array = Array2::from_shape_vec((dense.rows, dense.cols), dense.data)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    Ok(array.into_pyarray(py).into_any().unbind())
+}
+
+/// Immutable canonical CSR matrix with a NumPy-compatible numeric dtype.
 #[pyclass(name = "CsrMatrix", frozen, module = "sketch_spgemm._sketch_spgemm")]
 struct PyCsrMatrix {
-    inner: Arc<core::CsrMatrix>,
+    inner: CsrStorage,
 }
 
 impl PyCsrMatrix {
-    fn from_core(inner: core::CsrMatrix) -> Self {
+    fn from_i32(inner: core::CsrMatrix<i32>) -> Self {
         Self {
-            inner: Arc::new(inner),
+            inner: CsrStorage::I32(Arc::new(inner)),
+        }
+    }
+
+    fn from_i64(inner: core::CsrMatrix<i64>) -> Self {
+        Self {
+            inner: CsrStorage::I64(Arc::new(inner)),
+        }
+    }
+
+    fn from_f32(inner: core::CsrMatrix<f32>) -> Self {
+        Self {
+            inner: CsrStorage::F32(Arc::new(inner)),
+        }
+    }
+
+    fn from_f64(inner: core::CsrMatrix<f64>) -> Self {
+        Self {
+            inner: CsrStorage::F64(Arc::new(inner)),
         }
     }
 }
@@ -133,108 +362,31 @@ impl PyCsrMatrix {
 impl PyCsrMatrix {
     #[new]
     fn new(
-        data: PyReadonlyArray1<'_, i64>,
+        data: &Bound<'_, PyAny>,
         indices: PyReadonlyArray1<'_, i64>,
         indptr: PyReadonlyArray1<'_, i64>,
         shape: (usize, usize),
     ) -> PyResult<Self> {
-        let data = data
-            .as_slice()
-            .map_err(|_| value_error("data must be a contiguous one-dimensional array"))?;
-        let indices = indices
-            .as_slice()
-            .map_err(|_| value_error("indices must be a contiguous one-dimensional array"))?;
-        let indptr = indptr
-            .as_slice()
-            .map_err(|_| value_error("indptr must be a contiguous one-dimensional array"))?;
-
-        let (rows, cols) = shape;
-        if rows > i64::MAX as usize || cols > i64::MAX as usize {
-            return Err(PyOverflowError::new_err(
-                "shape dimensions must fit in signed 64-bit integers",
-            ));
+        if let Ok(values) = data.extract::<PyReadonlyArray1<'_, i32>>() {
+            return csr_from_arrays(values, indices, indptr, shape).map(Self::from_i32);
         }
-        if data.len() > i64::MAX as usize {
-            return Err(PyOverflowError::new_err(
-                "the number of stored values must fit in a signed 64-bit integer",
-            ));
+        if let Ok(values) = data.extract::<PyReadonlyArray1<'_, i64>>() {
+            return csr_from_arrays(values, indices, indptr, shape).map(Self::from_i64);
         }
-        if data.len() != indices.len() {
-            return Err(value_error("data and indices must have equal lengths"));
+        if let Ok(values) = data.extract::<PyReadonlyArray1<'_, f32>>() {
+            return csr_from_arrays(values, indices, indptr, shape).map(Self::from_f32);
         }
-        let expected_indptr = rows
-            .checked_add(1)
-            .ok_or_else(|| PyOverflowError::new_err("row count is too large"))?;
-        if indptr.len() != expected_indptr {
-            return Err(value_error(format!(
-                "indptr length must equal rows + 1 ({expected_indptr})"
-            )));
+        if let Ok(values) = data.extract::<PyReadonlyArray1<'_, f64>>() {
+            return csr_from_arrays(values, indices, indptr, shape).map(Self::from_f64);
         }
-        if indptr.first().copied() != Some(0) {
-            return Err(value_error("indptr must start at zero"));
-        }
-
-        let mut row_ptr = Vec::with_capacity(indptr.len());
-        let mut previous = 0usize;
-        for (position, &pointer) in indptr.iter().enumerate() {
-            let pointer = usize::try_from(pointer)
-                .map_err(|_| value_error(format!("indptr[{position}] must be non-negative")))?;
-            if pointer < previous {
-                return Err(value_error("indptr must be monotonically non-decreasing"));
-            }
-            if pointer > data.len() {
-                return Err(value_error("indptr entries cannot exceed nnz"));
-            }
-            row_ptr.push(pointer);
-            previous = pointer;
-        }
-        if previous != data.len() {
-            return Err(value_error("the final indptr entry must equal nnz"));
-        }
-
-        let mut col_idx = Vec::with_capacity(indices.len());
-        for (position, &column) in indices.iter().enumerate() {
-            let column = usize::try_from(column)
-                .map_err(|_| value_error(format!("indices[{position}] must be non-negative")))?;
-            if column >= cols {
-                return Err(value_error(format!(
-                    "indices[{position}]={column} is outside matrix width {cols}"
-                )));
-            }
-            col_idx.push(column);
-        }
-
-        for row in 0..rows {
-            let start = row_ptr[row];
-            let end = row_ptr[row + 1];
-            for position in start..end {
-                if data[position] == 0 {
-                    return Err(value_error(format!(
-                        "explicit zero at data[{position}] is not canonical CSR"
-                    )));
-                }
-                if position > start && col_idx[position - 1] >= col_idx[position] {
-                    return Err(value_error(format!(
-                        "column indices in row {row} must be strictly increasing"
-                    )));
-                }
-            }
-        }
-
-        Ok(Self::from_core(core::CsrMatrix {
-            rows,
-            cols,
-            row_ptr,
-            col_idx,
-            values: data.to_vec(),
-        }))
+        Err(dtype_error())
     }
 
     /// Build a canonical matrix from COO-style triplets.
     #[staticmethod]
     #[pyo3(signature = (data, row_indices, column_indices, shape, *, sorted=false))]
     fn from_triplets(
-        data: PyReadonlyArray1<'_, i64>,
+        data: &Bound<'_, PyAny>,
         row_indices: PyReadonlyArray1<'_, i64>,
         column_indices: PyReadonlyArray1<'_, i64>,
         shape: (usize, usize),
@@ -246,29 +398,40 @@ impl PyCsrMatrix {
                 "shape dimensions must fit in signed 64-bit integers",
             ));
         }
-        let triplets = collect_triplets(data, row_indices, column_indices)?;
-        let matrix = if sorted {
-            core::CsrMatrix::try_from_sorted_triplets(rows, cols, triplets)
-        } else {
-            core::CsrMatrix::try_from_triplets(rows, cols, &triplets)
+        macro_rules! build {
+            ($scalar:ty, $constructor:ident) => {
+                if let Ok(values) = data.extract::<PyReadonlyArray1<'_, $scalar>>() {
+                    let triplets = collect_triplets(values, row_indices, column_indices)?;
+                    let matrix = if sorted {
+                        core::CsrMatrix::try_from_sorted_triplets(rows, cols, triplets)
+                    } else {
+                        core::CsrMatrix::try_from_triplets(rows, cols, &triplets)
+                    }
+                    .map_err(map_build_error)?;
+                    return Ok(Self::$constructor(matrix));
+                }
+            };
         }
-        .map_err(map_build_error)?;
-        Ok(Self::from_core(matrix))
+        build!(i32, from_i32);
+        build!(i64, from_i64);
+        build!(f32, from_f32);
+        build!(f64, from_f64);
+        Err(dtype_error())
     }
 
     #[getter]
     fn rows(&self) -> usize {
-        self.inner.rows
+        self.inner.rows()
     }
 
     #[getter]
     fn cols(&self) -> usize {
-        self.inner.cols
+        self.inner.cols()
     }
 
     #[getter]
     fn shape(&self) -> (usize, usize) {
-        (self.inner.rows, self.inner.cols)
+        (self.inner.rows(), self.inner.cols())
     }
 
     #[getter]
@@ -276,64 +439,98 @@ impl PyCsrMatrix {
         self.inner.nnz()
     }
 
-    fn to_arrays<'py>(&self, py: Python<'py>) -> CsrArrays<'py> {
-        let data = self.inner.values.clone().into_pyarray(py);
-        let indices = self
-            .inner
-            .col_idx
-            .iter()
-            .map(|&value| value as i64)
-            .collect::<Vec<_>>()
-            .into_pyarray(py);
-        let indptr = self
-            .inner
-            .row_ptr
-            .iter()
-            .map(|&value| value as i64)
-            .collect::<Vec<_>>()
-            .into_pyarray(py);
-        (data, indices, indptr)
+    #[getter]
+    fn dtype(&self) -> &'static str {
+        self.inner.dtype()
     }
 
-    fn to_dense<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        let dense = self.inner.to_dense();
-        let array = Array2::from_shape_vec((dense.rows, dense.cols), dense.data)
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        Ok(array.into_pyarray(py))
+    fn to_arrays(&self, py: Python<'_>) -> PyCsrArrays {
+        match &self.inner {
+            CsrStorage::I32(matrix) => arrays_to_python(py, matrix),
+            CsrStorage::I64(matrix) => arrays_to_python(py, matrix),
+            CsrStorage::F32(matrix) => arrays_to_python(py, matrix),
+            CsrStorage::F64(matrix) => arrays_to_python(py, matrix),
+        }
+    }
+
+    fn to_dense(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.inner {
+            CsrStorage::I32(matrix) => dense_to_python(py, matrix),
+            CsrStorage::I64(matrix) => dense_to_python(py, matrix),
+            CsrStorage::F32(matrix) => dense_to_python(py, matrix),
+            CsrStorage::F64(matrix) => dense_to_python(py, matrix),
+        }
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "CsrMatrix(shape=({}, {}), nnz={})",
-            self.inner.rows,
-            self.inner.cols,
-            self.inner.nnz()
+            "CsrMatrix(shape=({}, {}), nnz={}, dtype='{}')",
+            self.inner.rows(),
+            self.inner.cols(),
+            self.inner.nnz(),
+            self.inner.dtype()
         )
+    }
+}
+
+enum CsrBuilderStorage {
+    I32(core::CsrBuilder<i32>),
+    I64(core::CsrBuilder<i64>),
+    F32(core::CsrBuilder<f32>),
+    F64(core::CsrBuilder<f64>),
+}
+
+impl CsrBuilderStorage {
+    fn finish(self) -> PyCsrMatrix {
+        match self {
+            Self::I32(builder) => PyCsrMatrix::from_i32(builder.finish()),
+            Self::I64(builder) => PyCsrMatrix::from_i64(builder.finish()),
+            Self::F32(builder) => PyCsrMatrix::from_f32(builder.finish()),
+            Self::F64(builder) => PyCsrMatrix::from_f64(builder.finish()),
+        }
     }
 }
 
 /// Incremental canonical CSR construction from row-major sorted triplets.
 #[pyclass(name = "CsrBuilder", module = "sketch_spgemm._sketch_spgemm")]
 struct PyCsrBuilder {
-    inner: Option<core::CsrBuilder>,
+    inner: Option<CsrBuilderStorage>,
     rows: usize,
     cols: usize,
+    dtype: &'static str,
 }
 
 #[pymethods]
 impl PyCsrBuilder {
     #[new]
-    #[pyo3(signature = (rows, cols, capacity=0))]
-    fn new(rows: usize, cols: usize, capacity: usize) -> PyResult<Self> {
+    #[pyo3(signature = (rows, cols, capacity=0, *, dtype="int64"))]
+    fn new(rows: usize, cols: usize, capacity: usize, dtype: &str) -> PyResult<Self> {
         if rows > i64::MAX as usize || cols > i64::MAX as usize {
             return Err(PyOverflowError::new_err(
                 "shape dimensions must fit in signed 64-bit integers",
             ));
         }
+        let dtype = parse_dtype(dtype)?;
+        let inner = match dtype {
+            "int32" => {
+                CsrBuilderStorage::I32(core::CsrBuilder::with_capacity(rows, cols, capacity))
+            }
+            "int64" => {
+                CsrBuilderStorage::I64(core::CsrBuilder::with_capacity(rows, cols, capacity))
+            }
+            "float32" => {
+                CsrBuilderStorage::F32(core::CsrBuilder::with_capacity(rows, cols, capacity))
+            }
+            "float64" => {
+                CsrBuilderStorage::F64(core::CsrBuilder::with_capacity(rows, cols, capacity))
+            }
+            _ => unreachable!(),
+        };
         Ok(Self {
-            inner: Some(core::CsrBuilder::with_capacity(rows, cols, capacity)),
+            inner: Some(inner),
             rows,
             cols,
+            dtype,
         })
     }
 
@@ -352,48 +549,59 @@ impl PyCsrBuilder {
         (self.rows, self.cols)
     }
 
+    #[getter]
+    fn dtype(&self) -> &'static str {
+        self.dtype
+    }
+
     /// Push one row-major sorted triplet.
-    fn push(&mut self, row: i64, column: i64, value: i64) -> PyResult<()> {
+    fn push(&mut self, row: i64, column: i64, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let row = nonnegative_index("row", 0, row)?;
         let column = nonnegative_index("column", 0, column)?;
-        self.active()?
-            .try_push(row, column, value)
-            .map_err(map_build_error)
+        match self.active()? {
+            CsrBuilderStorage::I32(builder) => builder.try_push(row, column, value.extract()?),
+            CsrBuilderStorage::I64(builder) => builder.try_push(row, column, value.extract()?),
+            CsrBuilderStorage::F32(builder) => builder.try_push(row, column, value.extract()?),
+            CsrBuilderStorage::F64(builder) => builder.try_push(row, column, value.extract()?),
+        }
+        .map_err(map_build_error)
     }
 
     /// Extend the builder with one contiguous NumPy chunk.
     fn extend(
         &mut self,
-        data: PyReadonlyArray1<'_, i64>,
+        data: &Bound<'_, PyAny>,
         row_indices: PyReadonlyArray1<'_, i64>,
         column_indices: PyReadonlyArray1<'_, i64>,
     ) -> PyResult<()> {
         // Validate the lifecycle even for an empty chunk. Keeping the builder
         // reference also avoids repeating the check for every coordinate.
-        let builder = self.active()?;
-        let data = data
-            .as_slice()
-            .map_err(|_| value_error("data must be a contiguous one-dimensional array"))?;
-        let row_indices = row_indices
-            .as_slice()
-            .map_err(|_| value_error("row_indices must be a contiguous one-dimensional array"))?;
-        let column_indices = column_indices.as_slice().map_err(|_| {
-            value_error("column_indices must be a contiguous one-dimensional array")
-        })?;
-        if data.len() != row_indices.len() || data.len() != column_indices.len() {
-            return Err(value_error(
-                "data, row_indices, and column_indices must have equal lengths",
-            ));
+        match self.active()? {
+            CsrBuilderStorage::I32(builder) => extend_builder(
+                builder,
+                data.extract().map_err(|_| dtype_error())?,
+                row_indices,
+                column_indices,
+            ),
+            CsrBuilderStorage::I64(builder) => extend_builder(
+                builder,
+                data.extract().map_err(|_| dtype_error())?,
+                row_indices,
+                column_indices,
+            ),
+            CsrBuilderStorage::F32(builder) => extend_builder(
+                builder,
+                data.extract().map_err(|_| dtype_error())?,
+                row_indices,
+                column_indices,
+            ),
+            CsrBuilderStorage::F64(builder) => extend_builder(
+                builder,
+                data.extract().map_err(|_| dtype_error())?,
+                row_indices,
+                column_indices,
+            ),
         }
-
-        for position in 0..data.len() {
-            let row = nonnegative_index("row_indices", position, row_indices[position])?;
-            let column = nonnegative_index("column_indices", position, column_indices[position])?;
-            builder
-                .try_push(row, column, data[position])
-                .map_err(map_build_error)?;
-        }
-        Ok(())
     }
 
     /// Consume the builder and return its canonical matrix.
@@ -402,7 +610,7 @@ impl PyCsrBuilder {
             .inner
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("CsrBuilder has already been finished"))?;
-        Ok(PyCsrMatrix::from_core(builder.finish()))
+        Ok(builder.finish())
     }
 
     fn __repr__(&self) -> String {
@@ -412,14 +620,14 @@ impl PyCsrBuilder {
             "finished"
         };
         format!(
-            "CsrBuilder(shape=({}, {}), state='{state}')",
-            self.rows, self.cols
+            "CsrBuilder(shape=({}, {}), dtype='{}', state='{state}')",
+            self.rows, self.cols, self.dtype
         )
     }
 }
 
 impl PyCsrBuilder {
-    fn active(&mut self) -> PyResult<&mut core::CsrBuilder> {
+    fn active(&mut self) -> PyResult<&mut CsrBuilderStorage> {
         self.inner
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("CsrBuilder has already been finished"))
@@ -1066,12 +1274,35 @@ fn checked_spgemm(
     left: PyRef<'_, PyCsrMatrix>,
     right: PyRef<'_, PyCsrMatrix>,
 ) -> PyResult<(PyCsrMatrix, PySpGemmStats)> {
-    let left = Arc::clone(&left.inner);
-    let right = Arc::clone(&right.inner);
-    let (product, stats) = py
-        .detach(move || core::try_spgemm_checked(left.as_ref(), right.as_ref()))
-        .map_err(map_core_error)?;
-    Ok((PyCsrMatrix::from_core(product), stats.into()))
+    match (left.inner.clone(), right.inner.clone()) {
+        (CsrStorage::I32(left), CsrStorage::I32(right)) => {
+            let (product, stats) = py
+                .detach(move || core::try_spgemm_checked(left.as_ref(), right.as_ref()))
+                .map_err(map_core_error)?;
+            Ok((PyCsrMatrix::from_i32(product), stats.into()))
+        }
+        (CsrStorage::I64(left), CsrStorage::I64(right)) => {
+            let (product, stats) = py
+                .detach(move || core::try_spgemm_checked(left.as_ref(), right.as_ref()))
+                .map_err(map_core_error)?;
+            Ok((PyCsrMatrix::from_i64(product), stats.into()))
+        }
+        (CsrStorage::F32(left), CsrStorage::F32(right)) => {
+            let (product, stats) = py
+                .detach(move || core::try_spgemm_checked(left.as_ref(), right.as_ref()))
+                .map_err(map_core_error)?;
+            Ok((PyCsrMatrix::from_f32(product), stats.into()))
+        }
+        (CsrStorage::F64(left), CsrStorage::F64(right)) => {
+            let (product, stats) = py
+                .detach(move || core::try_spgemm_checked(left.as_ref(), right.as_ref()))
+                .map_err(map_core_error)?;
+            Ok((PyCsrMatrix::from_f64(product), stats.into()))
+        }
+        _ => Err(PyTypeError::new_err(
+            "left and right matrices must have the same dtype",
+        )),
+    }
 }
 
 #[pyfunction]
@@ -1083,8 +1314,22 @@ fn auto_spgemm(
     right: PyRef<'_, PyCsrMatrix>,
     config: Option<PyRef<'_, PyAutoSpGemmConfig>>,
 ) -> PyResult<(PyCsrMatrix, PyAutoSpGemmStats)> {
-    let left = Arc::clone(&left.inner);
-    let right = Arc::clone(&right.inner);
+    let left = match &left.inner {
+        CsrStorage::I64(matrix) => Arc::clone(matrix),
+        _ => {
+            return Err(PyTypeError::new_err(
+                "auto_spgemm requires int64 matrices; use checked_spgemm for other dtypes",
+            ));
+        }
+    };
+    let right = match &right.inner {
+        CsrStorage::I64(matrix) => Arc::clone(matrix),
+        _ => {
+            return Err(PyTypeError::new_err(
+                "auto_spgemm requires int64 matrices; use checked_spgemm for other dtypes",
+            ));
+        }
+    };
     let config = config
         .as_ref()
         .map(|value| value.inner.clone())
@@ -1092,7 +1337,7 @@ fn auto_spgemm(
     let (product, stats) = py
         .detach(move || core::try_auto_spgemm(left.as_ref(), right.as_ref(), config))
         .map_err(map_core_error)?;
-    Ok((PyCsrMatrix::from_core(product), stats.into()))
+    Ok((PyCsrMatrix::from_i64(product), stats.into()))
 }
 
 #[pyfunction]
@@ -1104,8 +1349,22 @@ fn analyze_workload(
     right: PyRef<'_, PyCsrMatrix>,
     config: Option<PyRef<'_, PyAutoSpGemmConfig>>,
 ) -> PyResult<PyWorkloadEstimate> {
-    let left = Arc::clone(&left.inner);
-    let right = Arc::clone(&right.inner);
+    let left = match &left.inner {
+        CsrStorage::I64(matrix) => Arc::clone(matrix),
+        _ => {
+            return Err(PyTypeError::new_err(
+                "analyze_workload requires int64 matrices",
+            ))
+        }
+    };
+    let right = match &right.inner {
+        CsrStorage::I64(matrix) => Arc::clone(matrix),
+        _ => {
+            return Err(PyTypeError::new_err(
+                "analyze_workload requires int64 matrices",
+            ))
+        }
+    };
     let config = config
         .as_ref()
         .map(|value| value.inner.clone())

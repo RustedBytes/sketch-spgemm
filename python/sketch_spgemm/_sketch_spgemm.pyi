@@ -1,21 +1,37 @@
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional, Tuple, TypeAlias, Union
 
 import numpy as np
 import numpy.typing as npt
 
-Int64Array = npt.NDArray[np.int64]
-RectangularPolicy = Literal["auto", "dense", "sparse_left", "sparse_right", "sparse_sparse"]
-RectangularKernel = Literal["dense_blocked", "sparse_left", "sparse_right", "sparse_sparse"]
-AutoChoice = Literal["exact", "sketch", "exact_fallback"]
-ExactMethod = Literal["adaptive_dense", "hash_sparse"]
+Int64Array: TypeAlias = npt.NDArray[np.int64]
+NumericScalar: TypeAlias = Union[np.int32, np.int64, np.float32, np.float64]
+NumericArray: TypeAlias = npt.NDArray[NumericScalar]
+DTypeName: TypeAlias = Literal["int32", "int64", "float32", "float64"]
+RectangularPolicy: TypeAlias = Literal[
+    "auto", "dense", "sparse_left", "sparse_right", "sparse_sparse"
+]
+RectangularKernel: TypeAlias = Literal[
+    "dense_blocked", "sparse_left", "sparse_right", "sparse_sparse"
+]
+AutoChoice: TypeAlias = Literal["exact", "sketch", "exact_fallback"]
+ExactMethod: TypeAlias = Literal["adaptive_dense", "hash_sparse"]
 
 __version__: str
 
 class CsrMatrix:
-    """Immutable canonical CSR matrix with signed 64-bit values."""
-    def __init__(self, data: Int64Array, indices: Int64Array, indptr: Int64Array, shape: Tuple[int, int]) -> None: ...
+    """Immutable canonical CSR matrix with a supported NumPy numeric dtype."""
+    def __init__(
+        self, data: NumericArray, indices: Int64Array, indptr: Int64Array, shape: Tuple[int, int]
+    ) -> None: ...
     @staticmethod
-    def from_triplets(data: Int64Array, row_indices: Int64Array, column_indices: Int64Array, shape: Tuple[int, int], *, sorted: bool = False) -> CsrMatrix: ...
+    def from_triplets(
+        data: NumericArray,
+        row_indices: Int64Array,
+        column_indices: Int64Array,
+        shape: Tuple[int, int],
+        *,
+        sorted: bool = False,
+    ) -> CsrMatrix: ...
     @property
     def rows(self) -> int: ...
     @property
@@ -24,24 +40,40 @@ class CsrMatrix:
     def shape(self) -> Tuple[int, int]: ...
     @property
     def nnz(self) -> int: ...
-    def to_arrays(self) -> Tuple[Int64Array, Int64Array, Int64Array]: ...
-    def to_dense(self) -> Int64Array: ...
+    @property
+    def dtype(self) -> DTypeName: ...
+    def to_arrays(self) -> Tuple[NumericArray, Int64Array, Int64Array]: ...
+    def to_dense(self) -> NumericArray: ...
 
 class CsrBuilder:
     """Incremental CSR builder for row-major sorted triplets."""
-    def __init__(self, rows: int, cols: int, capacity: int = 0) -> None: ...
+    def __init__(
+        self, rows: int, cols: int, capacity: int = 0, *, dtype: DTypeName = "int64"
+    ) -> None: ...
     @property
     def rows(self) -> int: ...
     @property
     def cols(self) -> int: ...
     @property
     def shape(self) -> Tuple[int, int]: ...
-    def push(self, row: int, column: int, value: int) -> None: ...
-    def extend(self, data: Int64Array, row_indices: Int64Array, column_indices: Int64Array) -> None: ...
+    @property
+    def dtype(self) -> DTypeName: ...
+    def push(self, row: int, column: int, value: Union[int, float]) -> None: ...
+    def extend(
+        self, data: NumericArray, row_indices: Int64Array, column_indices: Int64Array
+    ) -> None: ...
     def finish(self) -> CsrMatrix: ...
 
 class MomentConfig:
-    def __init__(self, *, degree: int = 3, oversampling: float = 3.0, seed: int = 0x4D4F4D454E540001, identity_fallback: bool = True, guaranteed_correction: bool = True) -> None: ...
+    def __init__(
+        self,
+        *,
+        degree: int = 3,
+        oversampling: float = 3.0,
+        seed: int = 0x4D4F4D454E540001,
+        identity_fallback: bool = True,
+        guaranteed_correction: bool = True,
+    ) -> None: ...
     @property
     def degree(self) -> int: ...
     @property
@@ -61,7 +93,23 @@ class FingerprintConfig:
     def seed(self) -> int: ...
 
 class AutoSpGemmConfig:
-    def __init__(self, *, sample_rows: int = 8, initial_sample_rows: int = 2, min_structural_amplification: float = 64.0, k_safety_factor: float = 1.5, min_estimated_rho: float = 256.0, max_estimated_avg_column_nnz: float = 64.0, max_estimated_output_density: float = 0.10, max_moment_row_ratio: float = 0.80, rectangular_policy: RectangularPolicy = "auto", moment: Optional[MomentConfig] = None, fingerprint: Optional[FingerprintConfig] = None, exact_dense_cell_limit: int = 16_000_000, exact_fallback: bool = True) -> None: ...
+    def __init__(
+        self,
+        *,
+        sample_rows: int = 8,
+        initial_sample_rows: int = 2,
+        min_structural_amplification: float = 64.0,
+        k_safety_factor: float = 1.5,
+        min_estimated_rho: float = 256.0,
+        max_estimated_avg_column_nnz: float = 64.0,
+        max_estimated_output_density: float = 0.10,
+        max_moment_row_ratio: float = 0.80,
+        rectangular_policy: RectangularPolicy = "auto",
+        moment: Optional[MomentConfig] = None,
+        fingerprint: Optional[FingerprintConfig] = None,
+        exact_dense_cell_limit: int = 16_000_000,
+        exact_fallback: bool = True,
+    ) -> None: ...
     @property
     def sample_rows(self) -> int: ...
     @property
@@ -204,6 +252,10 @@ class AutoSpGemmStats:
 class SpGemmStats:
     candidate_products: int
 
-def auto_spgemm(left: CsrMatrix, right: CsrMatrix, config: Optional[AutoSpGemmConfig] = None) -> Tuple[CsrMatrix, AutoSpGemmStats]: ...
+def auto_spgemm(
+    left: CsrMatrix, right: CsrMatrix, config: Optional[AutoSpGemmConfig] = None
+) -> Tuple[CsrMatrix, AutoSpGemmStats]: ...
 def checked_spgemm(left: CsrMatrix, right: CsrMatrix) -> Tuple[CsrMatrix, SpGemmStats]: ...
-def analyze_workload(left: CsrMatrix, right: CsrMatrix, config: Optional[AutoSpGemmConfig] = None) -> WorkloadEstimate: ...
+def analyze_workload(
+    left: CsrMatrix, right: CsrMatrix, config: Optional[AutoSpGemmConfig] = None
+) -> WorkloadEstimate: ...

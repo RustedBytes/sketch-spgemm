@@ -131,11 +131,13 @@ np.testing.assert_array_equal(product.to_dense(), [[31, 33], [28, 44]])
 print(stats.choice, stats.timing.total)
 ```
 
-`data`, `indices`, and `indptr` must be contiguous one-dimensional `int64`
-arrays. Column indices in each row must be strictly increasing, duplicates and
-explicit zero values are rejected, and the constructor copies all input data.
-Use `analyze_workload(a, b, config)` to inspect the selector without computing
-the complete product.
+`data` must be a contiguous one-dimensional `int32`, `int64`, `float32`, or
+`float64` array. `indices` and `indptr` remain contiguous one-dimensional
+`int64` arrays. Column indices in each row must be strictly increasing,
+duplicates and explicit zero values are rejected, and the constructor copies
+all input data. `auto_spgemm` and `analyze_workload` require `int64` matrices;
+`checked_spgemm` supports every listed dtype and requires both operands to have
+the same dtype.
 
 Python also exposes the checked exact kernel and fallible COO construction:
 
@@ -151,7 +153,7 @@ matrix = CsrMatrix.from_triplets(
     (3, 3),
 )
 
-builder = CsrBuilder(3, 3, capacity=3)
+builder = CsrBuilder(3, 3, capacity=3, dtype="int64")
 builder.extend(
     np.array([4, -1], dtype=np.int64),
     np.array([0, 0], dtype=np.int64),
