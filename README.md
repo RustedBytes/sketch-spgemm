@@ -193,8 +193,9 @@ where
 `CsrInput` has an associated scalar type and requires canonical CSR rows:
 sorted unique columns and no explicit zeros. It lets external sparse containers
 participate without first copying their complete input into `CsrMatrix`.
-`try_auto_spgemm` requires `Scalar = i64`; other scalar types use the direct
-`try_spgemm_hash` kernel described below.
+`try_auto_spgemm` requires `Scalar = i64`. The scalar-aware `try_spgemm` entry
+point runs that automatic pipeline for `i64` and transparently uses the direct
+kernel for other supported scalar types.
 External containers exposing `usize` CSR buffers can use the checked,
 zero-copy `CsrView` adapter instead of defining a dedicated wrapper.
 
@@ -480,7 +481,8 @@ sampling, nested recovery, fingerprint setup and checks, and exact fallback.
 
 ```text
 auto_spgemm(...)                   automatic exact/sketch selection
-try_auto_spgemm(...)               fallible generic CsrInput entry point
+try_auto_spgemm(...)               fallible i64 automatic entry point
+try_spgemm(...)                    scalar-aware automatic/direct dispatch
 analyze_workload(...)              workload estimator
 try_analyze_workload(...)          fallible generic workload estimator
 nested_spgemm(...)                 theorem-oriented control flow
@@ -496,6 +498,8 @@ try_spgemm_hash(...)               fallible scalar-generic CSR baseline
 
 - Scalar-generic `CsrInput`, `spgemm_hash`, `try_spgemm_hash`, and
   `dense_matmul` APIs.
+- Scalar-aware `try_spgemm`: automatic exact/sketch selection for `i64` and
+  direct multiplication for other supported scalar types.
 - Checked zero-copy `CsrView` support for external CSR buffers.
 - Explicit CSC-to-CSR conversion with `CsrMatrix::from_csc`.
 - Scalar-generic borrowed `sprs` views and `petgraph` adjacency conversion.

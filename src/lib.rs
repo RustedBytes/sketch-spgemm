@@ -10,11 +10,13 @@
 //! adjacency and two-hop path-count helpers. See the `interop` module when either
 //! feature is enabled.
 //!
-//! Matrix containers, [`CsrInput`], [`spgemm_hash`], [`try_spgemm_hash`], and
-//! [`dense_matmul`] are generic over their scalar. Sketch recovery and residual
-//! fingerprints intentionally remain on [`Scalar`] (`i64`) because their
-//! decoding and field mapping require stronger integer semantics. Arithmetic
-//! overflow follows Rust's normal behavior for the selected scalar.
+//! Matrix containers, [`CsrInput`], [`try_spgemm`], [`spgemm_hash`],
+//! [`try_spgemm_hash`], and [`dense_matmul`] are generic over their scalar.
+//! [`try_spgemm`] uses automatic exact/sketch selection for [`Scalar`] (`i64`)
+//! and direct multiplication for other supported scalars. Sketch recovery and
+//! residual fingerprints remain on `i64` because their decoding and field
+//! mapping require stronger integer semantics. Arithmetic overflow follows
+//! Rust's normal behavior for the selected scalar.
 //!
 //! # Example
 //!
@@ -45,6 +47,8 @@
 
 /// Automatic workload analysis and exact/sketch execution selection.
 pub mod auto;
+/// Scalar-aware high-level exact/sketch dispatch.
+pub mod dispatch;
 /// Errors returned by fallible multiplication and adapter APIs.
 pub mod error;
 /// Probabilistic residual fingerprints for recovered products.
@@ -72,6 +76,7 @@ pub use auto::{
     analyze_workload, auto_spgemm, candidate_product_count, try_analyze_workload, try_auto_spgemm,
     AutoChoice, AutoSpGemmConfig, AutoSpGemmStats, AutoTimingStats, ExactMethod, WorkloadEstimate,
 };
+pub use dispatch::{try_spgemm, SpGemmDispatchScalar, SpGemmExecutionStats};
 pub use error::{MatrixOperand, SpGemmError};
 pub use fingerprint::{FingerprintConfig, FingerprintStats, ResidualFingerprint};
 pub use guv::{GuvConfig, GuvError, GuvParameters, GuvRecovery};
