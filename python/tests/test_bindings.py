@@ -36,6 +36,64 @@ def test_import_and_exact_product(operands):
     assert stats.exact_stats is not None
 
 
+def test_version():
+    assert ssg.__version__ == "0.11.0"
+
+
+def test_checked_product_and_overflow(operands):
+    left, right = operands
+    product, stats = ssg.checked_spgemm(left, right)
+    np.testing.assert_array_equal(product.to_dense(), [[31, 33], [28, 44]])
+    assert stats.candidate_products == 5
+
+    maximum = np.iinfo(np.int64).max
+    overflowing_left = csr([maximum], [0], [0, 1], (1, 1))
+    multiplier = csr([2], [0], [0, 1], (1, 1))
+    with pytest.raises(OverflowError, match="multiplication"):
+        ssg.checked_spgemm(overflowing_left, multiplier)
+
+
+def test_csr_from_unsorted_triplets():
+    matrix = ssg.CsrMatrix.from_triplets(
+        np.asarray([7, 4, -1, 5], dtype=np.int64),
+        np.asarray([2, 0, 0, 2], dtype=np.int64),
+        np.asarray([0, 1, 1, 2], dtype=np.int64),
+        (3, 3),
+    )
+    np.testing.assert_array_equal(matrix.to_dense(), [[0, 3, 0], [0, 0, 0], [7, 0, 5]])
+
+
+def test_streaming_csr_builder_accepts_chunks_and_closes_after_finish():
+    builder = ssg.CsrBuilder(3, 3, capacity=3)
+    builder.extend(
+        np.asarray([4, -1], dtype=np.int64),
+        np.asarray([0, 0], dtype=np.int64),
+        np.asarray([1, 1], dtype=np.int64),
+    )
+    builder.push(2, 0, 7)
+    assert builder.shape == (3, 3)
+
+    matrix = builder.finish()
+    np.testing.assert_array_equal(matrix.to_dense(), [[0, 3, 0], [0, 0, 0], [7, 0, 0]])
+    with pytest.raises(RuntimeError, match="already been finished"):
+        builder.push(2, 1, 1)
+    empty = np.asarray([], dtype=np.int64)
+    with pytest.raises(RuntimeError, match="already been finished"):
+        builder.extend(empty, empty, empty)
+
+
+def test_streaming_csr_builder_reports_order_and_overflow_errors():
+    builder = ssg.CsrBuilder(2, 2)
+    builder.push(1, 0, 1)
+    with pytest.raises(ValueError, match="row-major order"):
+        builder.push(0, 1, 1)
+
+    builder = ssg.CsrBuilder(1, 1)
+    builder.push(0, 0, np.iinfo(np.int64).max)
+    with pytest.raises(OverflowError, match="combining triplets"):
+        builder.push(0, 0, 1)
+
+
 def test_numpy_outputs_are_independent_int64_copies(operands):
     left, _ = operands
     data, indices, indptr = left.to_arrays()

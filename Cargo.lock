@@ -671,7 +671,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sketch-spgemm"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "criterion",
  "petgraph",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "sketch-spgemm-python"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "numpy",
  "pyo3",

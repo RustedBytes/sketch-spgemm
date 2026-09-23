@@ -10,6 +10,24 @@ pub enum MatrixOperand {
     Right,
 }
 
+/// Arithmetic operation that overflowed in a checked kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArithmeticOperation {
+    /// Multiplication of two matrix entries.
+    Multiply,
+    /// Addition into an output accumulator.
+    Add,
+}
+
+impl fmt::Display for ArithmeticOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Multiply => f.write_str("multiplication"),
+            Self::Add => f.write_str("addition"),
+        }
+    }
+}
+
 impl fmt::Display for MatrixOperand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -44,6 +62,17 @@ pub enum SpGemmError {
     },
     /// An ecosystem-native output rejected generated CSR buffers.
     InvalidOutputStructure(String),
+    /// Scalar arithmetic overflowed while accumulating an output entry.
+    ArithmeticOverflow {
+        /// Operation that could not be represented by the scalar type.
+        operation: ArithmeticOperation,
+        /// Output row being computed.
+        row: usize,
+        /// Inner-dimension index of the candidate product.
+        inner: usize,
+        /// Output column being computed.
+        column: usize,
+    },
 }
 
 impl fmt::Display for SpGemmError {
@@ -63,6 +92,15 @@ impl fmt::Display for SpGemmError {
             Self::InvalidOutputStructure(reason) => {
                 write!(f, "generated CSR output is invalid: {reason}")
             }
+            Self::ArithmeticOverflow {
+                operation,
+                row,
+                inner,
+                column,
+            } => write!(
+                f,
+                "arithmetic overflow during {operation} at output ({row}, {column}) through inner index {inner}"
+            ),
         }
     }
 }

@@ -3,6 +3,7 @@ from ._sketch_spgemm import (
     AutoSpGemmStats as AutoSpGemmStats,
     AutoTimingStats as AutoTimingStats,
     CorrectionPassStats as CorrectionPassStats,
+    CsrBuilder as CsrBuilder,
     CsrMatrix as CsrMatrix,
     FingerprintConfig as FingerprintConfig,
     FingerprintStats as FingerprintStats,
@@ -11,8 +12,10 @@ from ._sketch_spgemm import (
     NestedSpGemmStats as NestedSpGemmStats,
     RectangularStats as RectangularStats,
     RoundParams as RoundParams,
+    SpGemmStats as SpGemmStats,
     WorkloadEstimate as WorkloadEstimate,
     __version__ as __version__,
     analyze_workload as analyze_workload,
     auto_spgemm as auto_spgemm,
+    checked_spgemm as checked_spgemm,
 )

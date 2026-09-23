@@ -17,6 +17,54 @@ fn value_error(message: impl Into<String>) -> PyErr {
     PyValueError::new_err(message.into())
 }
 
+fn nonnegative_index(name: &str, position: usize, value: i64) -> PyResult<usize> {
+    usize::try_from(value)
+        .map_err(|_| value_error(format!("{name}[{position}] must be non-negative")))
+}
+
+fn map_build_error(error: core::CsrBuildError) -> PyErr {
+    match error {
+        core::CsrBuildError::ArithmeticOverflow { .. } => {
+            PyOverflowError::new_err(error.to_string())
+        }
+        core::CsrBuildError::RowOutOfBounds { .. }
+        | core::CsrBuildError::ColumnOutOfBounds { .. }
+        | core::CsrBuildError::OutOfOrder { .. } => value_error(error.to_string()),
+        _ => PyRuntimeError::new_err(error.to_string()),
+    }
+}
+
+fn collect_triplets(
+    data: PyReadonlyArray1<'_, i64>,
+    row_indices: PyReadonlyArray1<'_, i64>,
+    column_indices: PyReadonlyArray1<'_, i64>,
+) -> PyResult<Vec<(usize, usize, i64)>> {
+    let data = data
+        .as_slice()
+        .map_err(|_| value_error("data must be a contiguous one-dimensional array"))?;
+    let row_indices = row_indices
+        .as_slice()
+        .map_err(|_| value_error("row_indices must be a contiguous one-dimensional array"))?;
+    let column_indices = column_indices
+        .as_slice()
+        .map_err(|_| value_error("column_indices must be a contiguous one-dimensional array"))?;
+    if data.len() != row_indices.len() || data.len() != column_indices.len() {
+        return Err(value_error(
+            "data, row_indices, and column_indices must have equal lengths",
+        ));
+    }
+
+    let mut triplets = Vec::with_capacity(data.len());
+    for position in 0..data.len() {
+        triplets.push((
+            nonnegative_index("row_indices", position, row_indices[position])?,
+            nonnegative_index("column_indices", position, column_indices[position])?,
+            data[position],
+        ));
+    }
+    Ok(triplets)
+}
+
 fn finite_nonnegative(name: &str, value: f64) -> PyResult<()> {
     if value.is_finite() && value >= 0.0 {
         Ok(())
@@ -182,6 +230,32 @@ impl PyCsrMatrix {
         }))
     }
 
+    /// Build a canonical matrix from COO-style triplets.
+    #[staticmethod]
+    #[pyo3(signature = (data, row_indices, column_indices, shape, *, sorted=false))]
+    fn from_triplets(
+        data: PyReadonlyArray1<'_, i64>,
+        row_indices: PyReadonlyArray1<'_, i64>,
+        column_indices: PyReadonlyArray1<'_, i64>,
+        shape: (usize, usize),
+        sorted: bool,
+    ) -> PyResult<Self> {
+        let (rows, cols) = shape;
+        if rows > i64::MAX as usize || cols > i64::MAX as usize {
+            return Err(PyOverflowError::new_err(
+                "shape dimensions must fit in signed 64-bit integers",
+            ));
+        }
+        let triplets = collect_triplets(data, row_indices, column_indices)?;
+        let matrix = if sorted {
+            core::CsrMatrix::try_from_sorted_triplets(rows, cols, triplets)
+        } else {
+            core::CsrMatrix::try_from_triplets(rows, cols, &triplets)
+        }
+        .map_err(map_build_error)?;
+        Ok(Self::from_core(matrix))
+    }
+
     #[getter]
     fn rows(&self) -> usize {
         self.inner.rows
@@ -235,6 +309,120 @@ impl PyCsrMatrix {
             self.inner.cols,
             self.inner.nnz()
         )
+    }
+}
+
+/// Incremental canonical CSR construction from row-major sorted triplets.
+#[pyclass(name = "CsrBuilder", module = "sketch_spgemm._sketch_spgemm")]
+struct PyCsrBuilder {
+    inner: Option<core::CsrBuilder>,
+    rows: usize,
+    cols: usize,
+}
+
+#[pymethods]
+impl PyCsrBuilder {
+    #[new]
+    #[pyo3(signature = (rows, cols, capacity=0))]
+    fn new(rows: usize, cols: usize, capacity: usize) -> PyResult<Self> {
+        if rows > i64::MAX as usize || cols > i64::MAX as usize {
+            return Err(PyOverflowError::new_err(
+                "shape dimensions must fit in signed 64-bit integers",
+            ));
+        }
+        Ok(Self {
+            inner: Some(core::CsrBuilder::with_capacity(rows, cols, capacity)),
+            rows,
+            cols,
+        })
+    }
+
+    #[getter]
+    fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[getter]
+    fn cols(&self) -> usize {
+        self.cols
+    }
+
+    #[getter]
+    fn shape(&self) -> (usize, usize) {
+        (self.rows, self.cols)
+    }
+
+    /// Push one row-major sorted triplet.
+    fn push(&mut self, row: i64, column: i64, value: i64) -> PyResult<()> {
+        let row = nonnegative_index("row", 0, row)?;
+        let column = nonnegative_index("column", 0, column)?;
+        self.active()?
+            .try_push(row, column, value)
+            .map_err(map_build_error)
+    }
+
+    /// Extend the builder with one contiguous NumPy chunk.
+    fn extend(
+        &mut self,
+        data: PyReadonlyArray1<'_, i64>,
+        row_indices: PyReadonlyArray1<'_, i64>,
+        column_indices: PyReadonlyArray1<'_, i64>,
+    ) -> PyResult<()> {
+        // Validate the lifecycle even for an empty chunk. Keeping the builder
+        // reference also avoids repeating the check for every coordinate.
+        let builder = self.active()?;
+        let data = data
+            .as_slice()
+            .map_err(|_| value_error("data must be a contiguous one-dimensional array"))?;
+        let row_indices = row_indices
+            .as_slice()
+            .map_err(|_| value_error("row_indices must be a contiguous one-dimensional array"))?;
+        let column_indices = column_indices.as_slice().map_err(|_| {
+            value_error("column_indices must be a contiguous one-dimensional array")
+        })?;
+        if data.len() != row_indices.len() || data.len() != column_indices.len() {
+            return Err(value_error(
+                "data, row_indices, and column_indices must have equal lengths",
+            ));
+        }
+
+        for position in 0..data.len() {
+            let row = nonnegative_index("row_indices", position, row_indices[position])?;
+            let column = nonnegative_index("column_indices", position, column_indices[position])?;
+            builder
+                .try_push(row, column, data[position])
+                .map_err(map_build_error)?;
+        }
+        Ok(())
+    }
+
+    /// Consume the builder and return its canonical matrix.
+    fn finish(&mut self) -> PyResult<PyCsrMatrix> {
+        let builder = self
+            .inner
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("CsrBuilder has already been finished"))?;
+        Ok(PyCsrMatrix::from_core(builder.finish()))
+    }
+
+    fn __repr__(&self) -> String {
+        let state = if self.inner.is_some() {
+            "active"
+        } else {
+            "finished"
+        };
+        format!(
+            "CsrBuilder(shape=({}, {}), state='{state}')",
+            self.rows, self.cols
+        )
+    }
+}
+
+impl PyCsrBuilder {
+    fn active(&mut self) -> PyResult<&mut core::CsrBuilder> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("CsrBuilder has already been finished"))
     }
 }
 
@@ -843,15 +1031,47 @@ impl From<core::AutoSpGemmStats> for PyAutoSpGemmStats {
     }
 }
 
+/// Statistics returned by exact checked sparse multiplication.
+#[pyclass(name = "SpGemmStats", frozen, module = "sketch_spgemm._sketch_spgemm")]
+struct PySpGemmStats {
+    #[pyo3(get)]
+    candidate_products: u128,
+}
+
+impl From<core::SpGemmStats> for PySpGemmStats {
+    fn from(value: core::SpGemmStats) -> Self {
+        Self {
+            candidate_products: value.candidate_products,
+        }
+    }
+}
+
 fn map_core_error(error: core::SpGemmError) -> PyErr {
     match error {
         core::SpGemmError::DimensionMismatch { .. } => value_error(error.to_string()),
-        core::SpGemmError::IndexOverflow { .. } => PyOverflowError::new_err(error.to_string()),
+        core::SpGemmError::IndexOverflow { .. } | core::SpGemmError::ArithmeticOverflow { .. } => {
+            PyOverflowError::new_err(error.to_string())
+        }
         core::SpGemmError::NonCsrStorage { .. } | core::SpGemmError::InvalidOutputStructure(_) => {
             PyRuntimeError::new_err(error.to_string())
         }
         _ => PyRuntimeError::new_err(error.to_string()),
     }
+}
+
+#[pyfunction]
+/// Multiply two CSR matrices with overflow-detecting exact arithmetic.
+fn checked_spgemm(
+    py: Python<'_>,
+    left: PyRef<'_, PyCsrMatrix>,
+    right: PyRef<'_, PyCsrMatrix>,
+) -> PyResult<(PyCsrMatrix, PySpGemmStats)> {
+    let left = Arc::clone(&left.inner);
+    let right = Arc::clone(&right.inner);
+    let (product, stats) = py
+        .detach(move || core::try_spgemm_checked(left.as_ref(), right.as_ref()))
+        .map_err(map_core_error)?;
+    Ok((PyCsrMatrix::from_core(product), stats.into()))
 }
 
 #[pyfunction]
@@ -899,6 +1119,7 @@ fn analyze_workload(
 #[pyo3(name = "_sketch_spgemm")]
 fn py_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCsrMatrix>()?;
+    m.add_class::<PyCsrBuilder>()?;
     m.add_class::<PyMomentConfig>()?;
     m.add_class::<PyFingerprintConfig>()?;
     m.add_class::<PyAutoSpGemmConfig>()?;
@@ -911,8 +1132,10 @@ fn py_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNestedRoundStats>()?;
     m.add_class::<PyNestedSpGemmStats>()?;
     m.add_class::<PyAutoSpGemmStats>()?;
+    m.add_class::<PySpGemmStats>()?;
+    m.add_function(wrap_pyfunction!(checked_spgemm, m)?)?;
     m.add_function(wrap_pyfunction!(auto_spgemm, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_workload, m)?)?;
-    m.add("__version__", "0.10.0")?;
+    m.add("__version__", "0.11.0")?;
     Ok(())
 }

@@ -5,6 +5,25 @@ All notable changes to `sketch-spgemm` are documented in this file.
 The project follows Semantic Versioning while it is in the `0.x` development
 series. Breaking public API changes may therefore appear in minor releases.
 
+## 0.11.0
+
+### Added
+
+- `CheckedAddScalar` and `CheckedSpGemmScalar` extension traits for custom
+  overflow-detecting scalar arithmetic.
+- Overflow-detecting sparse and dense exact kernels through
+  `try_spgemm_checked`, `try_spgemm_hash_checked`, and
+  `try_dense_matmul_checked`.
+- Fallible `CsrMatrix::try_from_triplets` construction and a streaming
+  row-major `CsrBuilder` with checked duplicate aggregation.
+- Python `checked_spgemm`, `SpGemmStats`, `CsrBuilder`, and
+  `CsrMatrix.from_triplets` bindings with NumPy input and mapped Python errors.
+
+### Changed
+
+- The Rust crate, Python package, bindings, and type information were advanced
+  to `0.11.0`.
+
 ## 0.10.0
 
 ### Added

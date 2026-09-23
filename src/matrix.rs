@@ -237,6 +237,246 @@ pub trait SpGemmScalar: Copy + Default + PartialEq + AddAssign + Mul<Output = Se
 
 impl<T> SpGemmScalar for T where T: Copy + Default + PartialEq + AddAssign + Mul<Output = Self> {}
 
+/// Scalar addition required when duplicate coordinates are combined by
+/// overflow-detecting matrix construction APIs.
+///
+/// Implementations must return `None` when the exact result cannot be
+/// represented by the scalar. Every intermediate addition is checked in input
+/// order, so a temporarily unrepresentable sum is an error even if later terms
+/// would bring it back into range. Floating-point implementations additionally
+/// reject non-finite results.
+pub trait CheckedAddScalar: Copy {
+    /// Add two values when the result is representable.
+    fn checked_add_value(self, rhs: Self) -> Option<Self>;
+}
+
+/// Scalar operations required by overflow-detecting multiplication APIs.
+pub trait CheckedSpGemmScalar: SpGemmScalar + CheckedAddScalar {
+    /// Multiply two values when the result is representable.
+    fn checked_mul_value(self, rhs: Self) -> Option<Self>;
+}
+
+macro_rules! impl_checked_integer_scalar {
+    ($($scalar:ty),+ $(,)?) => {
+        $(
+            impl CheckedAddScalar for $scalar {
+                #[inline]
+                fn checked_add_value(self, rhs: Self) -> Option<Self> {
+                    <$scalar>::checked_add(self, rhs)
+                }
+            }
+
+            impl CheckedSpGemmScalar for $scalar {
+                #[inline]
+                fn checked_mul_value(self, rhs: Self) -> Option<Self> {
+                    <$scalar>::checked_mul(self, rhs)
+                }
+            }
+        )+
+    };
+}
+
+impl_checked_integer_scalar!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize,);
+
+macro_rules! impl_checked_float_scalar {
+    ($($scalar:ty),+ $(,)?) => {
+        $(
+            impl CheckedAddScalar for $scalar {
+                #[inline]
+                fn checked_add_value(self, rhs: Self) -> Option<Self> {
+                    let result = self + rhs;
+                    result.is_finite().then_some(result)
+                }
+            }
+
+            impl CheckedSpGemmScalar for $scalar {
+                #[inline]
+                fn checked_mul_value(self, rhs: Self) -> Option<Self> {
+                    let result = self * rhs;
+                    result.is_finite().then_some(result)
+                }
+            }
+        )+
+    };
+}
+
+impl_checked_float_scalar!(f32, f64);
+
+/// Error returned while constructing canonical CSR storage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CsrBuildError {
+    /// A triplet row lies outside the declared matrix shape.
+    RowOutOfBounds { row: usize, rows: usize },
+    /// A triplet column lies outside the declared matrix shape.
+    ColumnOutOfBounds { column: usize, columns: usize },
+    /// A streaming builder received a coordinate before its predecessor.
+    OutOfOrder {
+        previous: (usize, usize),
+        current: (usize, usize),
+    },
+    /// Duplicate values could not be added without overflow.
+    ArithmeticOverflow { row: usize, column: usize },
+}
+
+impl fmt::Display for CsrBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RowOutOfBounds { row, rows } => {
+                write!(f, "triplet row {row} is outside 0..{rows}")
+            }
+            Self::ColumnOutOfBounds { column, columns } => {
+                write!(f, "triplet column {column} is outside 0..{columns}")
+            }
+            Self::OutOfOrder { previous, current } => write!(
+                f,
+                "triplet coordinate ({}, {}) follows ({}, {}) but row-major order is required",
+                current.0, current.1, previous.0, previous.1
+            ),
+            Self::ArithmeticOverflow { row, column } => write!(
+                f,
+                "arithmetic overflow while combining triplets at ({row}, {column})"
+            ),
+        }
+    }
+}
+
+impl Error for CsrBuildError {}
+
+/// Streaming builder for canonical CSR matrices from row-major sorted
+/// triplets.
+///
+/// Coordinates must be pushed in nondecreasing `(row, column)` order.
+/// Duplicate coordinates are combined with checked addition, resulting zeros
+/// are removed, and empty rows are emitted without buffering their entries.
+#[derive(Clone, Debug)]
+pub struct CsrBuilder<T = Scalar> {
+    rows: usize,
+    cols: usize,
+    row_ptr: Vec<usize>,
+    col_idx: Vec<usize>,
+    values: Vec<T>,
+    last_coordinate: Option<(usize, usize)>,
+    pending: Option<(usize, usize, T)>,
+}
+
+impl<T> CsrBuilder<T> {
+    /// Create an empty streaming builder.
+    pub fn new(rows: usize, cols: usize) -> Self {
+        Self::with_capacity(rows, cols, 0)
+    }
+
+    /// Create a builder with space reserved for approximately `capacity`
+    /// output entries.
+    pub fn with_capacity(rows: usize, cols: usize, capacity: usize) -> Self {
+        Self {
+            rows,
+            cols,
+            row_ptr: Vec::with_capacity(rows.saturating_add(1)),
+            col_idx: Vec::with_capacity(capacity),
+            values: Vec::with_capacity(capacity),
+            last_coordinate: None,
+            pending: None,
+        }
+    }
+}
+
+impl<T> CsrBuilder<T>
+where
+    T: CheckedAddScalar + Default + PartialEq,
+{
+    /// Push one row-major sorted triplet into the builder.
+    pub fn try_push(&mut self, row: usize, column: usize, value: T) -> Result<(), CsrBuildError> {
+        if row >= self.rows {
+            return Err(CsrBuildError::RowOutOfBounds {
+                row,
+                rows: self.rows,
+            });
+        }
+        if column >= self.cols {
+            return Err(CsrBuildError::ColumnOutOfBounds {
+                column,
+                columns: self.cols,
+            });
+        }
+
+        let coordinate = (row, column);
+        if let Some(previous) = self.last_coordinate {
+            if coordinate < previous {
+                return Err(CsrBuildError::OutOfOrder {
+                    previous,
+                    current: coordinate,
+                });
+            }
+            if coordinate == previous {
+                if value == T::default() {
+                    return Ok(());
+                }
+                if let Some((_, _, current)) = self.pending.as_mut() {
+                    let sum = current
+                        .checked_add_value(value)
+                        .ok_or(CsrBuildError::ArithmeticOverflow { row, column })?;
+                    if sum == T::default() {
+                        self.pending = None;
+                    } else {
+                        *current = sum;
+                    }
+                } else {
+                    self.pending = Some((row, column, value));
+                }
+                return Ok(());
+            }
+        }
+
+        self.flush_pending();
+        while self.row_ptr.len() <= row {
+            self.row_ptr.push(self.values.len());
+        }
+        self.last_coordinate = Some(coordinate);
+        if value != T::default() {
+            self.pending = Some((row, column, value));
+        }
+        Ok(())
+    }
+
+    /// Extend the builder from row-major sorted triplets.
+    ///
+    /// This is a streaming, non-transactional operation. If a later triplet
+    /// returns an error, all earlier triplets from the same iterator remain in
+    /// the builder and construction may continue from that retained prefix.
+    pub fn try_extend<I>(&mut self, triplets: I) -> Result<&mut Self, CsrBuildError>
+    where
+        I: IntoIterator<Item = (usize, usize, T)>,
+    {
+        for (row, column, value) in triplets {
+            self.try_push(row, column, value)?;
+        }
+        Ok(self)
+    }
+
+    /// Finish construction and return canonical CSR storage.
+    pub fn finish(mut self) -> CsrMatrix<T> {
+        self.flush_pending();
+        while self.row_ptr.len() <= self.rows {
+            self.row_ptr.push(self.values.len());
+        }
+        CsrMatrix {
+            rows: self.rows,
+            cols: self.cols,
+            row_ptr: self.row_ptr,
+            col_idx: self.col_idx,
+            values: self.values,
+        }
+    }
+
+    fn flush_pending(&mut self) {
+        if let Some((_, column, value)) = self.pending.take() {
+            self.col_idx.push(column);
+            self.values.push(value);
+        }
+    }
+}
+
 /// Representation-independent matrix metadata.
 ///
 /// This trait deliberately exposes only operations that are cheap for both
@@ -395,6 +635,92 @@ where
             }
         }
         out
+    }
+}
+
+impl<T> CsrMatrix<T>
+where
+    T: CheckedAddScalar + Default + PartialEq,
+{
+    /// Build canonical CSR storage from unsorted triplets without panicking or
+    /// silently overflowing while duplicate coordinates are combined.
+    /// Duplicate additions are checked in input order; the function does not
+    /// use a wider accumulator to permit temporary overflow and later
+    /// cancellation.
+    pub fn try_from_triplets(
+        rows: usize,
+        cols: usize,
+        triplets: &[(usize, usize, T)],
+    ) -> Result<Self, CsrBuildError> {
+        let zero = T::default();
+        let mut per_row: Vec<BTreeMap<usize, T>> = (0..rows).map(|_| BTreeMap::new()).collect();
+
+        for &(row, column, value) in triplets {
+            if row >= rows {
+                return Err(CsrBuildError::RowOutOfBounds { row, rows });
+            }
+            if column >= cols {
+                return Err(CsrBuildError::ColumnOutOfBounds {
+                    column,
+                    columns: cols,
+                });
+            }
+            if value == zero {
+                continue;
+            }
+
+            if let Some(current) = per_row[row].get(&column).copied() {
+                let sum = current
+                    .checked_add_value(value)
+                    .ok_or(CsrBuildError::ArithmeticOverflow { row, column })?;
+                if sum == zero {
+                    per_row[row].remove(&column);
+                } else {
+                    per_row[row].insert(column, sum);
+                }
+            } else {
+                per_row[row].insert(column, value);
+            }
+        }
+
+        let mut row_ptr = Vec::with_capacity(rows.saturating_add(1));
+        let mut col_idx = Vec::with_capacity(triplets.len());
+        let mut values = Vec::with_capacity(triplets.len());
+        row_ptr.push(0);
+        for row in per_row {
+            for (column, value) in row {
+                col_idx.push(column);
+                values.push(value);
+            }
+            row_ptr.push(col_idx.len());
+        }
+
+        Ok(Self {
+            rows,
+            cols,
+            row_ptr,
+            col_idx,
+            values,
+        })
+    }
+
+    /// Build canonical CSR storage from a row-major sorted triplet stream.
+    ///
+    /// Unlike [`Self::try_from_triplets`], this path does not retain all input
+    /// triplets or allocate a map for each matrix row.
+    pub fn try_from_sorted_triplets<I>(
+        rows: usize,
+        cols: usize,
+        triplets: I,
+    ) -> Result<Self, CsrBuildError>
+    where
+        I: IntoIterator<Item = (usize, usize, T)>,
+    {
+        let iterator = triplets.into_iter();
+        let capacity = iterator.size_hint().0;
+        let mut builder = CsrBuilder::with_capacity(rows, cols, capacity);
+        builder.try_extend(iterator)?;
+        Ok(builder.finish())
     }
 }
 
@@ -714,5 +1040,73 @@ mod tests {
     fn checked_csr_view_rejects_noncanonical_rows() {
         let error = CsrView::try_new(1, 3, &[0, 2], &[2, 1], &[4_i32, 5]).unwrap_err();
         assert!(error.reason().contains("strictly increasing"));
+    }
+
+    #[test]
+    fn streaming_builder_combines_duplicates_and_preserves_empty_rows() {
+        let matrix = CsrMatrix::<i64>::try_from_sorted_triplets(
+            4,
+            4,
+            [
+                (0, 2, 4),
+                (0, 2, -1),
+                (1, 0, 0),
+                (2, 1, 5),
+                (2, 3, 2),
+                (2, 3, -2),
+                (3, 0, 7),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(matrix.row_ptr, vec![0, 1, 1, 2, 3]);
+        assert_eq!(matrix.col_idx, vec![2, 1, 0]);
+        assert_eq!(matrix.values, vec![3, 5, 7]);
+    }
+
+    #[test]
+    fn streaming_builder_rejects_out_of_order_coordinates() {
+        let mut builder = CsrBuilder::<i32>::new(2, 3);
+        builder.try_push(1, 0, 4).unwrap();
+        let error = builder.try_push(0, 2, 5).unwrap_err();
+        assert_eq!(
+            error,
+            CsrBuildError::OutOfOrder {
+                previous: (1, 0),
+                current: (0, 2),
+            }
+        );
+    }
+
+    #[test]
+    fn checked_triplet_construction_reports_duplicate_overflow() {
+        let error =
+            CsrMatrix::<i8>::try_from_triplets(1, 1, &[(0, 0, 127), (0, 0, 1)]).unwrap_err();
+        assert_eq!(
+            error,
+            CsrBuildError::ArithmeticOverflow { row: 0, column: 0 }
+        );
+
+        let mut builder = CsrBuilder::<i8>::new(1, 1);
+        builder.try_push(0, 0, 127).unwrap();
+        assert_eq!(
+            builder.try_push(0, 0, 1).unwrap_err(),
+            CsrBuildError::ArithmeticOverflow { row: 0, column: 0 }
+        );
+    }
+
+    #[test]
+    fn checked_triplet_construction_reports_invalid_coordinates() {
+        assert_eq!(
+            CsrMatrix::<i64>::try_from_triplets(1, 2, &[(1, 0, 3)]).unwrap_err(),
+            CsrBuildError::RowOutOfBounds { row: 1, rows: 1 }
+        );
+        assert_eq!(
+            CsrMatrix::<i64>::try_from_triplets(1, 2, &[(0, 2, 3)]).unwrap_err(),
+            CsrBuildError::ColumnOutOfBounds {
+                column: 2,
+                columns: 2,
+            }
+        );
     }
 }

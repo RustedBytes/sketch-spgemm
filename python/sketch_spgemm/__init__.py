@@ -5,6 +5,7 @@ from ._sketch_spgemm import (
     AutoSpGemmStats,
     AutoTimingStats,
     CorrectionPassStats,
+    CsrBuilder,
     CsrMatrix,
     FingerprintConfig,
     FingerprintStats,
@@ -13,10 +14,12 @@ from ._sketch_spgemm import (
     NestedSpGemmStats,
     RectangularStats,
     RoundParams,
+    SpGemmStats,
     WorkloadEstimate,
     __version__,
     analyze_workload,
     auto_spgemm,
+    checked_spgemm,
 )
 
 __all__ = [
@@ -24,6 +27,7 @@ __all__ = [
     "AutoSpGemmStats",
     "AutoTimingStats",
     "CorrectionPassStats",
+    "CsrBuilder",
     "CsrMatrix",
     "FingerprintConfig",
     "FingerprintStats",
@@ -32,8 +36,10 @@ __all__ = [
     "NestedSpGemmStats",
     "RectangularStats",
     "RoundParams",
+    "SpGemmStats",
     "WorkloadEstimate",
     "__version__",
     "analyze_workload",
     "auto_spgemm",
+    "checked_spgemm",
 ]

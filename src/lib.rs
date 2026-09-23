@@ -11,12 +11,14 @@
 //! feature is enabled.
 //!
 //! Matrix containers, [`CsrInput`], [`try_spgemm`], [`spgemm_hash`],
-//! [`try_spgemm_hash`], and [`dense_matmul`] are generic over their scalar.
+//! [`try_spgemm_hash`], [`try_spgemm_hash_checked`], and [`dense_matmul`] are
+//! generic over their scalar.
 //! [`try_spgemm`] uses automatic exact/sketch selection for [`Scalar`] (`i64`)
 //! and direct multiplication for other supported scalars. Sketch recovery and
 //! residual fingerprints remain on `i64` because their decoding and field
-//! mapping require stronger integer semantics. Arithmetic overflow follows
-//! Rust's normal behavior for the selected scalar.
+//! mapping require stronger integer semantics. The ordinary kernels follow
+//! Rust's normal overflow behavior; [`try_spgemm_checked`] and
+//! [`try_dense_matmul_checked`] report non-representable scalar arithmetic.
 //!
 //! # Example
 //!
@@ -77,12 +79,12 @@ pub use auto::{
     AutoChoice, AutoSpGemmConfig, AutoSpGemmStats, AutoTimingStats, ExactMethod, WorkloadEstimate,
 };
 pub use dispatch::{try_spgemm, SpGemmDispatchScalar, SpGemmExecutionStats};
-pub use error::{MatrixOperand, SpGemmError};
+pub use error::{ArithmeticOperation, MatrixOperand, SpGemmError};
 pub use fingerprint::{FingerprintConfig, FingerprintStats, ResidualFingerprint};
 pub use guv::{GuvConfig, GuvError, GuvParameters, GuvRecovery};
 pub use matrix::{
-    CsrInput, CsrMatrix, CsrRowIter, CsrStructureError, CsrView, DenseMatrix, Matrix, MatrixLike,
-    Scalar, SpGemmScalar,
+    CheckedAddScalar, CheckedSpGemmScalar, CsrBuildError, CsrBuilder, CsrInput, CsrMatrix,
+    CsrRowIter, CsrStructureError, CsrView, DenseMatrix, Matrix, MatrixLike, Scalar, SpGemmScalar,
 };
 pub use recovery::{
     left_recovery_sketch, nested_spgemm, nested_spgemm_with_options, nested_spgemm_with_policy,
@@ -97,5 +99,8 @@ pub use rect::{
 pub use sketch::{
     direct_two_sided_sketch, left_sketch, paper_schedule, right_sketch, RoundParams, SketchMap,
 };
-pub use spgemm::{dense_matmul, spgemm_hash, try_spgemm_hash, SpGemmStats};
+pub use spgemm::{
+    dense_matmul, spgemm_hash, try_dense_matmul_checked, try_spgemm_checked, try_spgemm_hash,
+    try_spgemm_hash_checked, SpGemmStats,
+};
 pub use synthetic::{overlap_problem, sparse_output_problem, SyntheticProblem};

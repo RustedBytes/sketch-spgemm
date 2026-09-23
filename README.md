@@ -137,6 +137,36 @@ explicit zero values are rejected, and the constructor copies all input data.
 Use `analyze_workload(a, b, config)` to inspect the selector without computing
 the complete product.
 
+Python also exposes the checked exact kernel and fallible COO construction:
+
+```python
+from sketch_spgemm import CsrBuilder, CsrMatrix, checked_spgemm
+
+safe_product, direct_stats = checked_spgemm(a, b)
+
+matrix = CsrMatrix.from_triplets(
+    np.array([4, -1, 7], dtype=np.int64),
+    np.array([0, 0, 2], dtype=np.int64),
+    np.array([1, 1, 0], dtype=np.int64),
+    (3, 3),
+)
+
+builder = CsrBuilder(3, 3, capacity=3)
+builder.extend(
+    np.array([4, -1], dtype=np.int64),
+    np.array([0, 0], dtype=np.int64),
+    np.array([1, 1], dtype=np.int64),
+)
+builder.push(2, 0, 7)
+streamed_matrix = builder.finish()
+```
+
+`CsrBuilder` requires globally row-major sorted coordinates across every
+`extend` and `push` call. Duplicate aggregation and checked multiplication
+raise Python `OverflowError`; malformed coordinates raise `ValueError`.
+`extend` is streaming rather than transactional: if a later coordinate fails,
+the successfully processed prefix remains in the builder.
+
 ### Library example
 
 Add the library to a Cargo project:
@@ -345,6 +375,51 @@ Here "direct" means that no probabilistic sketch is used. Floating-point
 results retain the usual rounding, NaN, and signed-zero semantics of their Rust
 primitive type.
 
+For overflow-sensitive workloads, `try_spgemm_checked` and
+`try_dense_matmul_checked` use exact direct kernels and return
+`SpGemmError::ArithmeticOverflow` with the output coordinate and inner index:
+
+```rust
+use sketch_spgemm::{try_spgemm_checked, CsrMatrix};
+
+let a = CsrMatrix::<i64>::try_from_triplets(1, 2, &[(0, 0, 2), (0, 1, 3)])?;
+let b = CsrMatrix::<i64>::try_from_triplets(2, 1, &[(0, 0, 5), (1, 0, 7)])?;
+let (c, _) = try_spgemm_checked(&a, &b)?;
+assert_eq!(c.values, vec![31]);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Each multiplication and intermediate accumulation is checked in canonical
+inner-index order. The kernels intentionally do not widen the accumulator, so
+temporary overflow is reported even if later cancellation would make the final
+mathematical sum fit in the scalar type. Use a wider scalar type when that
+behavior is required.
+
+`CsrBuilder` constructs canonical CSR incrementally from row-major sorted
+triplets without retaining the complete COO input. It combines duplicates with
+checked addition, removes resulting zeros, preserves empty rows, and reports
+out-of-range or out-of-order coordinates:
+
+```rust
+use sketch_spgemm::CsrBuilder;
+
+let mut builder = CsrBuilder::<i64>::with_capacity(3, 3, 4);
+builder.try_extend([
+    (0, 1, 4),
+    (0, 1, -1),
+    (2, 0, 7),
+])?;
+let matrix = builder.finish();
+assert_eq!(matrix.row_ptr, vec![0, 1, 1, 2]);
+assert_eq!(matrix.values, vec![3, 7]);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Use `CsrMatrix::try_from_triplets` when input coordinates are not sorted. That
+path allocates per-row maps; `try_from_sorted_triplets` and `CsrBuilder` are the
+streaming alternatives for already ordered data. `CsrBuilder::try_extend` is
+non-transactional: entries preceding an error remain applied to the builder.
+
 Kernels continue to accept concrete dense or CSR types so representation
 dispatch happens outside performance-sensitive inner loops.
 
@@ -471,6 +546,11 @@ adaptive_matmul(...)               one-shot rectangular multiplication
 adaptive_matmul_prepared(...)      cached-factor rectangular multiplication
 spgemm_hash(...)                   direct CSR baseline
 try_spgemm_hash(...)               fallible scalar-generic CSR baseline
+try_spgemm_checked(...)            overflow-detecting exact CSR product
+try_spgemm_hash_checked(...)       checked hash-accumulator kernel
+try_dense_matmul_checked(...)      checked dense product
+CsrMatrix::try_from_triplets(...)  checked unsorted COO conversion
+CsrBuilder                         checked streaming sorted COO conversion
 ```
 
 ## Changelog
@@ -481,7 +561,8 @@ Release-to-release changes are maintained in [changelog.md](changelog.md).
 
 - Automatic sketch recovery and fingerprint APIs currently operate on exact
   signed 64-bit integers. Other scalar types use the direct kernels.
-- Arithmetic overflow is not converted into a recoverable error.
+- Automatic sketch execution follows ordinary `i64` overflow semantics;
+  callers requiring recoverable overflow must use the checked exact kernels.
 - Execution is CPU-only and currently single-process.
 - There are no CUDA, Metal, or distributed integrations.
 - The practical moment/fingerprint path is probabilistic rather than the
