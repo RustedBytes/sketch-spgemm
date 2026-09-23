@@ -1,2 +1,7 @@
 target/
 .DS_Store
+.venv/
+.pytest_cache/
+__pycache__/
+*.so
+*.pyd

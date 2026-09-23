@@ -1,0 +1,15 @@
+[package]
+name = "sketch-spgemm-python"
+version = "0.9.0"
+edition = "2021"
+rust-version = "1.91"
+publish = false
+
+[lib]
+name = "_sketch_spgemm"
+crate-type = ["cdylib"]
+
+[dependencies]
+numpy = "0.29.0"
+pyo3 = { version = "0.29.2", features = ["extension-module"] }
+sketch-spgemm = { path = ".." }

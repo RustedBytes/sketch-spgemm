@@ -97,6 +97,45 @@ cargo test
 cargo run --release --example benchmark
 ```
 
+### Python bindings
+
+The Python package supports CPython 3.9 or newer and uses NumPy `int64`
+buffers for canonical CSR matrices. Build and install it into the active
+virtual environment with [Maturin](https://www.maturin.rs/):
+
+```bash
+python -m pip install maturin
+maturin develop --release
+```
+
+```python
+import numpy as np
+from sketch_spgemm import CsrMatrix, auto_spgemm
+
+a = CsrMatrix(
+    np.array([2, 3, 4], dtype=np.int64),
+    np.array([0, 1, 1], dtype=np.int64),
+    np.array([0, 2, 3], dtype=np.int64),
+    (2, 2),
+)
+b = CsrMatrix(
+    np.array([5, 7, 11], dtype=np.int64),
+    np.array([0, 0, 1], dtype=np.int64),
+    np.array([0, 1, 3], dtype=np.int64),
+    (2, 2),
+)
+
+product, stats = auto_spgemm(a, b)
+np.testing.assert_array_equal(product.to_dense(), [[31, 33], [28, 44]])
+print(stats.choice, stats.timing.total)
+```
+
+`data`, `indices`, and `indptr` must be contiguous one-dimensional `int64`
+arrays. Column indices in each row must be strictly increasing, duplicates and
+explicit zero values are rejected, and the constructor copies all input data.
+Use `analyze_workload(a, b, config)` to inspect the selector without computing
+the complete product.
+
 ### Library example
 
 Add the library to a Cargo project:
