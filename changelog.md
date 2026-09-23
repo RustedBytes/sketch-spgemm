@@ -27,8 +27,9 @@ series. Breaking public API changes may therefore appear in minor releases.
 - `CsrInput` now exposes its scalar as an associated type.
 - Sketch recovery and residual fingerprints remain specialized to exact `i64`
   arithmetic; other scalars transparently use the direct high-level path.
-- The Rust crate, Python package, bindings, and benchmark version strings were
-  advanced to `0.10.0`.
+- Custom benchmark timing was replaced with Criterion suites for the core,
+  `sprs`, and `petgraph` workloads.
+- The Rust crate, Python package, and bindings were advanced to `0.10.0`.
 
 ### Compatibility
 

@@ -1,15 +1,15 @@
-mod support;
-
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use petgraph::graph::DiGraph;
 use petgraph::visit::{EdgeRef, NodeIndexable};
 use sketch_spgemm::interop::petgraph::two_hop_path_counts;
-use sketch_spgemm::synthetic::sparse_output_problem;
-use sketch_spgemm::{AutoSpGemmConfig, CsrMatrix};
+use sketch_spgemm::{sparse_output_problem, AutoSpGemmConfig, CsrMatrix};
 use std::collections::BTreeMap;
+use std::hint::black_box;
+use std::time::Duration;
 
-fn main() {
-    let duration = support::duration_from_args();
+fn petgraph_comparison(criterion: &mut Criterion) {
     let problem = sparse_output_problem(128, 256, 256, 64, 7, 0.75, 256);
+    let candidate_products = problem.expected_candidate_products;
     let mut graph = DiGraph::<(), i64>::new();
     let nodes: Vec<_> = (0..problem.a.rows + problem.a.cols + problem.b.cols)
         .map(|_| graph.add_node(()))
@@ -32,31 +32,21 @@ fn main() {
 
     let config = sketch_config();
     let standard_product = direct_two_hop_counts(&graph);
-    let (sketch_product, initial_stats) =
+    let (sketch_product, _) =
         two_hop_path_counts(&graph, |weight| *weight, config.clone()).unwrap();
     assert_eq!(sketch_product, standard_product);
 
-    println!("petgraph weighted two-hop benchmark");
-    println!(
-        "nodes: {}, edges: {}, output nnz: {}",
-        graph.node_count(),
-        graph.edge_count(),
-        standard_product.nnz()
-    );
-    println!("sketch-spgemm selected: {:?}", initial_stats.choice);
-    println!(
-        "measurement window per implementation: {:.2}s",
-        duration.as_secs_f64()
-    );
-
-    let standard = support::measure(duration, || direct_two_hop_counts(&graph));
-    let sketch = support::measure(duration, || {
-        two_hop_path_counts(&graph, |weight| *weight, config.clone())
-            .unwrap()
-            .0
+    let mut group = criterion.benchmark_group("petgraph-comparison");
+    group.throughput(Throughput::Elements(
+        candidate_products.min(u64::MAX as u128) as u64,
+    ));
+    group.bench_function("petgraph-traversal", |b| {
+        b.iter(|| direct_two_hop_counts(black_box(&graph)))
     });
-
-    support::print_comparison("petgraph traversal", &standard, &sketch);
+    group.bench_function("sketch-spgemm", |b| {
+        b.iter(|| two_hop_path_counts(black_box(&graph), |weight| *weight, config.clone()).unwrap())
+    });
+    group.finish();
 }
 
 fn direct_two_hop_counts(graph: &DiGraph<(), i64>) -> CsrMatrix {
@@ -108,3 +98,17 @@ fn sketch_config() -> AutoSpGemmConfig {
         ..AutoSpGemmConfig::default()
     }
 }
+
+fn criterion_config() -> Criterion {
+    Criterion::default()
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(2))
+        .sample_size(20)
+}
+
+criterion_group! {
+    name = benches;
+    config = criterion_config();
+    targets = petgraph_comparison
+}
+criterion_main!(benches);

@@ -14,6 +14,7 @@ categories = ["algorithms", "data-structures", "mathematics", "science"]
 include = [
     "src/**/*.rs",
     "examples/**/*.rs",
+    "benches/**/*.rs",
     "Cargo.toml",
     "README.md",
     "changelog.md",
@@ -38,10 +39,6 @@ name = "sketch_spgemm"
 path = "src/lib.rs"
 
 [[example]]
-name = "benchmark"
-path = "examples/benchmark.rs"
-
-[[example]]
 name = "sprs"
 path = "examples/sprs.rs"
 required-features = ["sprs"]
@@ -51,14 +48,21 @@ name = "petgraph"
 path = "examples/petgraph.rs"
 required-features = ["petgraph"]
 
-[[example]]
-name = "benchmark-sprs"
-path = "examples/benchmark_sprs.rs"
+[[bench]]
+name = "benchmark"
+path = "benches/benchmark.rs"
+harness = false
+
+[[bench]]
+name = "sprs"
+path = "benches/sprs.rs"
+harness = false
 required-features = ["sprs"]
 
-[[example]]
-name = "benchmark-petgraph"
-path = "examples/benchmark_petgraph.rs"
+[[bench]]
+name = "petgraph"
+path = "benches/petgraph.rs"
+harness = false
 required-features = ["petgraph"]
 
 [profile.release]
@@ -68,3 +72,6 @@ codegen-units = 1
 [dependencies]
 petgraph = { version = "0.8.3", optional = true, default-features = false }
 sprs = { version = "0.11.5", optional = true, default-features = false }
+
+[dev-dependencies]
+criterion = "0.8.2"

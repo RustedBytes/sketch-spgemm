@@ -94,7 +94,7 @@ Clone the repository, run the tests, and execute the default benchmark:
 
 ```bash
 cargo test
-cargo run --release --example benchmark
+cargo bench --bench benchmark
 ```
 
 ### Python bindings
@@ -216,21 +216,21 @@ cargo run --example sprs --features sprs
 cargo run --example petgraph --features petgraph
 ```
 
-It also includes end-to-end throughput comparisons. The optional final
-argument is the measurement time per implementation in seconds:
+It also includes end-to-end Criterion throughput comparisons:
 
 ```bash
-cargo run --release --example benchmark-sprs --features sprs -- 2
-cargo run --release --example benchmark-petgraph --features petgraph -- 2
+cargo bench --bench sprs --features sprs
+cargo bench --bench petgraph --features petgraph
 ```
 
 Each benchmark first checks that the standard ecosystem result and the
-`sketch-spgemm` result are identical. It then reports standard operations per
-second, `sketch-spgemm` operations per second, and their throughput ratio.
+`sketch-spgemm` result are identical. Criterion then performs warm-up and
+statistical sampling, and reports timing and throughput estimates.
 The `sprs` comparison uses native CSR multiplication. The `petgraph` comparison
 uses direct weighted two-hop edge traversal. Both measurements are end to end,
 including output construction and, for `sketch-spgemm`, workload selection and
-adapter overhead.
+adapter overhead. Pass Criterion options after `--`, for example
+`--measurement-time 5` or `--sample-size 50`.
 
 ### `sprs`
 
@@ -397,12 +397,12 @@ Three independently seeded lanes are enabled by default.
 This is a **probabilistic residual certificate**. Exact identity recovery and
 exact correction remain available when deterministic verification is required.
 
-Relevant CLI options:
+Relevant `AutoSpGemmConfig` fields:
 
 ```text
---residual-fingerprint true|false
---fingerprint-lanes N
---fingerprint-seed N     # 0 selects a runtime-derived seed
+residual_fingerprint: bool
+fingerprint_lanes: usize
+fingerprint_seed: u64     // 0 selects a runtime-derived seed
 ```
 
 ## Recovery backends
@@ -444,38 +444,16 @@ reused recovery factors do not pay repeated conversion costs. The one-shot
 ## Recommended sparse-output benchmark
 
 ```bash
-cargo run --release --example benchmark -- \
-  --synthetic sparse-output \
-  --rows 256 \
-  --inner 512 \
-  --cols 512 \
-  --active-cols 128 \
-  --output-col-nnz 7 \
-  --amplification-width 512 \
-  --cancel 0.75 \
-  --nested-backend moment \
-  --recovery-degree 3 \
-  --recovery-oversampling 3.0 \
-  --identity-fallback true \
-  --guaranteed-correction false \
-  --practical-scheduler true \
-  --masked-residual true \
-  --exact-k-bound false \
-  --residual-fingerprint true \
-  --fingerprint-lanes 3 \
-  --auto-select true \
-  --auto-sample-rows 8 \
-  --rect-kernel auto \
-  --repeats 5
+cargo bench --bench benchmark -- 'sparse-product/.*/sparse-output'
 ```
 
-A successful automatic run should report a sketch choice, a passing benchmark
-oracle check, a successful fingerprint certificate, and an estimated
-per-active-column output size near the configured single digits. The overlap
-workload with dense surviving columns should instead select exact execution.
+The benchmark uses fixed deterministic overlap and sparse-output workloads and
+checks every measured implementation against the exact CSR result before
+sampling. Run the complete suite with `cargo bench --bench benchmark`, or tune
+Criterion after `--`, for example with `--measurement-time 5 --sample-size 50`.
 
-The benchmark prints separate timings for analysis, candidate counting, row
-sampling, nested recovery, fingerprint setup and checks, and exact fallback.
+Criterion stores detailed reports under `target/criterion/` when its plotting
+backend is available.
 
 ## Public API
 
@@ -509,7 +487,6 @@ Release-to-release changes are maintained in [changelog.md](changelog.md).
   deterministic theorem from the motivating paper.
 - Performance depends strongly on output geometry. Sparse inputs alone do not
   imply that sketch recovery will be beneficial.
-- The CLI is a research and benchmark harness, not a production service.
 
 ## Source layout
 
@@ -526,8 +503,13 @@ src/
 ├── spgemm.rs      hash baseline and simple dense kernel
 ├── synthetic.rs   synthetic sparse-output workloads
 └── lib.rs         public library exports
+benches/
+├── benchmark.rs   Criterion product and sketch-kernel benchmarks
+├── petgraph.rs    Criterion petgraph comparison
+└── sprs.rs        Criterion sprs comparison
 examples/
-└── benchmark.rs   research and benchmark CLI
+├── petgraph.rs    petgraph integration example
+└── sprs.rs        sprs integration example
 ```
 
 ## Project status
