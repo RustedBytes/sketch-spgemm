@@ -100,9 +100,10 @@ cargo bench --bench benchmark
 
 ### Python bindings
 
-The Python package supports CPython 3.9 or newer and uses NumPy `int64`
-buffers for canonical CSR matrices. Build and install it into the active
-virtual environment with [Maturin](https://www.maturin.rs/):
+The Python package supports CPython 3.9 or newer. CSR values use NumPy `int32`,
+`int64`, `uint64`, `float32`, or `float64` buffers, while column indices and row
+pointers always use `int64`. Build and install it into the active virtual
+environment with [Maturin](https://www.maturin.rs/):
 
 ```bash
 python -m pip install maturin
@@ -133,11 +134,11 @@ print(stats.choice, stats.timing.total)
 
 `data` must be a contiguous one-dimensional `int32`, `int64`, `uint64`,
 `float32`, or `float64` array. `indices` and `indptr` remain contiguous
-one-dimensional `int64` arrays. Column indices in each row must be strictly increasing,
-duplicates and explicit zero values are rejected, and the constructor copies
-all input data. `auto_spgemm` and `analyze_workload` require `int64` matrices;
-`checked_spgemm` supports every listed dtype and requires both operands to have
-the same dtype.
+one-dimensional `int64` arrays. Column indices in each row must be strictly
+increasing, duplicates and explicit zero values are rejected, and the
+constructor copies all input data. `auto_spgemm` and `analyze_workload` require
+`int64` matrices; `checked_spgemm` supports every listed dtype and requires both
+operands to have the same dtype.
 
 Python also exposes the checked exact kernel and fallible COO construction:
 
@@ -169,8 +170,10 @@ raise Python `OverflowError`; malformed coordinates raise `ValueError`.
 `extend` is streaming rather than transactional: if a later coordinate fails,
 the successfully processed prefix remains in the builder.
 
-Exact direct multiplication and common transaction-graph transformations are
-available for every supported dtype:
+Direct multiplication and common transaction-graph transformations are
+available for every supported dtype. `spgemm` follows the ordinary arithmetic
+semantics of the selected dtype; use `checked_spgemm` when integer overflow or
+non-finite floating-point results must be reported:
 
 ```python
 import numpy as np
@@ -182,12 +185,12 @@ incoming = matrix.transpose()
 degrees = matrix.row_nnz()
 outflow = matrix.row_sums()
 binary = matrix.binarize()
-combined = matrix.checked_add(other)
-focused = matrix.select_rows(np.array([10, 42, 99], dtype=np.int64))
+combined = matrix.checked_add(matrix)
+focused = matrix.select_rows(np.array([2, 0, 2], dtype=np.int64))
 
 # SciPy remains optional; install with `pip install sketch-spgemm[scipy]`.
+scipy_csr = to_scipy(matrix)
 native = from_scipy(scipy_csr)
-scipy_csr = to_scipy(native)
 ```
 
 An exceeded `max_output_nnz` raises `MemoryError` before the completed row is
@@ -397,9 +400,12 @@ assert_eq!(c.values, vec![31]);
 # Ok::<(), sketch_spgemm::SpGemmError>(())
 ```
 
-Here "direct" means that no probabilistic sketch is used. Floating-point
-results retain the usual rounding, NaN, and signed-zero semantics of their Rust
-primitive type.
+Here "direct" means that no probabilistic sketch is used. Unchecked
+floating-point arithmetic retains the usual primitive rounding and NaN
+behavior. Canonical sparse output omits values that compare equal to zero, so
+neither `0.0` nor `-0.0` is stored as an explicit CSR entry. Checked
+floating-point APIs additionally reject non-finite multiplication or
+accumulation results.
 
 For overflow-sensitive workloads, `try_spgemm_checked` and
 `try_dense_matmul_checked` use exact direct kernels and return
@@ -583,12 +589,16 @@ spgemm_hash(...)                   direct CSR baseline
 try_spgemm_hash(...)               fallible scalar-generic CSR baseline
 try_spgemm_checked(...)            overflow-detecting exact CSR product
 try_spgemm_hash_checked(...)       checked hash-accumulator kernel
+try_spgemm_hash_checked_with_options(...) checked product with output budget
 try_spgemm_hash_with_options(...)  direct product with output budget
 try_spgemm_semiring(...)           configurable path algebra
 try_spgemm_checked_with_accumulator(...) widened checked result
 try_dense_matmul_checked(...)      checked dense product
 CsrMatrix::try_from_triplets(...)  checked unsorted COO conversion
 CsrBuilder                         checked streaming sorted COO conversion
+CsrMatrix::transpose/try_add(...)  canonical graph transformations
+CsrMatrix::try_row_sums/try_column_sums(...) checked reductions
+CsrMatrix::select_rows(...)        checked row selection
 ```
 
 ## Changelog
@@ -613,14 +623,17 @@ Release-to-release changes are maintained in [changelog.md](changelog.md).
 ```text
 src/
 ├── auto.rs        workload sampling and exact/sketch selection
+├── dispatch.rs    scalar-aware automatic/direct dispatch
+├── error.rs       structured construction and arithmetic errors
 ├── fingerprint.rs bilinear residual certificate over 2^61 - 1
 ├── guv.rs         explicit GUV finite-field construction
 ├── interop/       optional sprs and petgraph adapters
-├── matrix.rs      CSR and dense integer matrix primitives
+├── matrix.rs      scalar-generic CSR and dense matrix containers
+├── ops.rs         CSR transformations, reductions, and checked addition
 ├── recovery.rs    recovery backends, masks, schedulers, and caches
 ├── rect.rs        adaptive rectangular kernels and prepared factors
 ├── sketch.rs      probes and the Graia q/p/t schedule
-├── spgemm.rs      hash baseline and simple dense kernel
+├── spgemm.rs      direct, checked, semiring, and output-budget kernels
 ├── synthetic.rs   synthetic sparse-output workloads
 └── lib.rs         public library exports
 benches/
