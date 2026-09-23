@@ -16,6 +16,7 @@ include = [
     "examples/**/*.rs",
     "Cargo.toml",
     "README.md",
+    "changelog.md",
     "LICENSE-MIT",
 ]
 

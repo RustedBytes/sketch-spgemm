@@ -494,34 +494,9 @@ spgemm_hash(...)                   direct CSR baseline
 try_spgemm_hash(...)               fallible scalar-generic CSR baseline
 ```
 
-## What's new in v0.10.0
+## Changelog
 
-- Scalar-generic `CsrInput`, `spgemm_hash`, `try_spgemm_hash`, and
-  `dense_matmul` APIs.
-- Scalar-aware `try_spgemm`: automatic exact/sketch selection for `i64` and
-  direct multiplication for other supported scalar types.
-- Checked zero-copy `CsrView` support for external CSR buffers.
-- Explicit CSC-to-CSR conversion with `CsrMatrix::from_csc`.
-- Scalar-generic borrowed `sprs` views and `petgraph` adjacency conversion.
-- Automatic sketch recovery remains deliberately specialized to exact `i64`
-  arithmetic.
-
-Changes introduced in v0.9.0 included:
-
-- Optional zero-copy `sprs` CSR input and native-output integration.
-- Optional weighted `petgraph` adjacency and two-hop path-count integration.
-- Public `CsrInput` trait and fallible generic automatic APIs.
-- Structured dimension, storage, index, and output-construction errors.
-- Generic `CsrMatrix<T>` and `DenseMatrix<T>` containers with backward-
-  compatible `i64` defaults.
-- Shared `MatrixLike` metadata and a `Matrix<T>` boundary enum.
-- Explicit `Scalar` alias for the exact arithmetic used by recovery.
-- Lower-overhead structural analysis and staged row sampling.
-- Dense scratch accumulation with touched-column tracking for sampled rows.
-- Fused residual-fingerprint lanes over one sparse traversal of each input.
-- Fast Mersenne reduction in place of generic 128-bit remainder operations.
-- Separate conservative schedule bounds and tighter scheduler hints.
-- Detailed timing fields in `AutoSpGemmStats`.
+Release-to-release changes are maintained in [changelog.md](changelog.md).
 
 ## Limitations
 
