@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Match tag and package versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          expected = os.environ["RELEASE_TAG"].removeprefix("v")
+          manifests = ("Cargo.toml", "python/Cargo.toml", "pyproject.toml")
+          mismatches = []
+          for manifest in manifests:
+              with pathlib.Path(manifest).open("rb") as source:
+                  document = tomllib.load(source)
+              section = "project" if manifest == "pyproject.toml" else "package"
+              actual = document[section]["version"]
+              if actual != expected:
+                  mismatches.append(f"{manifest}: expected {expected}, found {actual}")
+          if mismatches:
+              raise SystemExit("Release version mismatch:\n" + "\n".join(mismatches))
+          print(f"Validated release version {expected}")
+          PY
+
+  linux:
+    name: Linux wheel (${{ matrix.target }})
+    needs: validate
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build manylinux wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          maturin-version: v1.15.0
+          rust-toolchain: "1.91"
+          target: ${{ matrix.target }}
+          manylinux: "2014"
+          args: --release --locked --compatibility pypi --out dist --find-interpreter
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: distributions-linux-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  macos:
+    name: macOS wheel (${{ matrix.target }})
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+      - name: Build macOS wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          maturin-version: v1.15.0
+          rust-toolchain: "1.91"
+          target: ${{ matrix.target }}
+          args: --release --locked --compatibility pypi --out dist --find-interpreter
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: distributions-macos-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  windows:
+    name: Windows wheel (x86_64)
+    needs: validate
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          architecture: x64
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+      - name: Build Windows wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          maturin-version: v1.15.0
+          rust-toolchain: "1.91"
+          target: x86_64-pc-windows-msvc
+          args: --release --locked --compatibility pypi --out dist --find-interpreter
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: distributions-windows-x86_64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: Source distribution
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build source distribution
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          maturin-version: v1.15.0
+          rust-toolchain: "1.91"
+          args: --out dist
+      - name: Upload source distribution
+        uses: actions/upload-artifact@v7
+        with:
+          name: distributions-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [linux, macos, windows, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/sketch-spgemm
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v8
+        with:
+          pattern: distributions-*
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub release and upload assets
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') }}
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
