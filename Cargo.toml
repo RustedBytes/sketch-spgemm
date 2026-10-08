@@ -65,6 +65,10 @@ path = "benches/petgraph.rs"
 harness = false
 required-features = ["petgraph"]
 
+[[bench]]
+name = "core_operations"
+harness = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
