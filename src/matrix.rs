@@ -135,11 +135,14 @@ where
         col_idx: &'a [usize],
         values: &'a [T],
     ) -> Result<Self, CsrStructureError> {
-        if row_ptr.len() != rows + 1 {
+        let expected_len = rows.checked_add(1).ok_or_else(|| {
+            CsrStructureError::new("row count cannot be represented by a CSR row pointer length")
+        })?;
+        if row_ptr.len() != expected_len {
             return Err(CsrStructureError::new(format!(
                 "row_ptr has length {}, expected {}",
                 row_ptr.len(),
-                rows + 1
+                expected_len
             )));
         }
         if col_idx.len() != values.len() {
@@ -1108,5 +1111,9 @@ mod tests {
                 columns: 2,
             }
         );
+    }
+    #[test]
+    fn csr_view_rejects_unrepresentable_row_pointer_length() {
+        assert!(CsrView::<i64>::try_new(usize::MAX, 0, &[], &[], &[]).is_err());
     }
 }

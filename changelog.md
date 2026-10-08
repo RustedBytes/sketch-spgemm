@@ -7,6 +7,18 @@ series. Breaking public API changes may therefore appear in minor releases.
 
 ## Unreleased
 
+### Fixed
+
+- Reject residual fingerprint modulus aliases with a second prime field and a
+  conservative residual bound, preserving the primary fingerprint API.
+- Preserve the Python streaming builder prefix when a later coordinate is negative.
+- Return a CSR structure error for an unrepresentable row pointer length.
+
+### Added
+
+- Rust CI tests on MSRV 1.91 and stable, with optional/minimal features,
+  formatting, and Clippy checks.
+
 ### Performance
 
 - Update direct semiring, checked, and widened-accumulator sparse products
