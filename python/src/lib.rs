@@ -1722,6 +1722,6 @@ fn py_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(checked_spgemm, m)?)?;
     m.add_function(wrap_pyfunction!(auto_spgemm, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_workload, m)?)?;
-    m.add("__version__", "0.11.0")?;
+    m.add("__version__", "0.12.0")?;
     Ok(())
 }

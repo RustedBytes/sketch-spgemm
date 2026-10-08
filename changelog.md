@@ -7,6 +7,8 @@ series. Breaking public API changes may therefore appear in minor releases.
 
 ## Unreleased
 
+## 0.12.0 - 2026-10-08
+
 ### Fixed
 
 - Reject residual fingerprint modulus aliases with a second prime field and a
