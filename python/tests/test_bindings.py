@@ -376,3 +376,14 @@ def test_configuration_validation():
         ssg.MomentConfig(degree=0)
     with pytest.raises(ValueError, match="lanes"):
         ssg.FingerprintConfig(lanes=0)
+
+
+@pytest.mark.parametrize("dtype", ["int32", "int64", "uint64", "float32", "float64"])
+@pytest.mark.parametrize("coordinate", ["row", "column"])
+def test_builder_extend_keeps_prefix_before_negative_coordinate(dtype, coordinate):
+    builder = ssg.CsrBuilder(2, 2, dtype=dtype)
+    rows = np.array([0, -1 if coordinate == "row" else 1], dtype=np.int64)
+    columns = np.array([0, -1 if coordinate == "column" else 1], dtype=np.int64)
+    with pytest.raises(ValueError, match="must be non-negative"):
+        builder.extend(np.array([5, 6], dtype=dtype), rows, columns)
+    np.testing.assert_array_equal(builder.finish().to_dense(), [[5, 0], [0, 0]])
