@@ -2,7 +2,46 @@ name: Python bindings
 
 on:
   push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
+      - "python/**"
+      - "pyproject.toml"
+      - "README.md"
+      - "LICENSE*"
+      - "ruff.toml"
+      - ".ruff.toml"
+      - "pyrightconfig.json"
+      - ".github/workflows/python.yml"
   pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
+      - "python/**"
+      - "pyproject.toml"
+      - "README.md"
+      - "LICENSE*"
+      - "ruff.toml"
+      - ".ruff.toml"
+      - "pyrightconfig.json"
+      - ".github/workflows/python.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   quality:
