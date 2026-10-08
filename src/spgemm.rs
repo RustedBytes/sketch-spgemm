@@ -167,8 +167,8 @@ where
             for (column, right) in b.row(inner) {
                 stats.candidate_products = stats.candidate_products.saturating_add(1);
                 let product = semiring.multiply(left, right);
-                let current = acc.get(&column).copied().unwrap_or_else(|| semiring.zero());
-                acc.insert(column, semiring.add(current, product));
+                let current = acc.entry(column).or_insert_with(|| semiring.zero());
+                *current = semiring.add(*current, product);
             }
         }
         let mut output_row: Vec<_> = acc
@@ -255,7 +255,7 @@ where
                             inner,
                             column,
                         })?;
-                let current = acc.get(&column).copied().unwrap_or(zero);
+                let current = acc.entry(column).or_insert(zero);
                 let sum =
                     current
                         .checked_add_value(product)
@@ -265,7 +265,7 @@ where
                             inner,
                             column,
                         })?;
-                acc.insert(column, sum);
+                *current = sum;
             }
         }
 
@@ -336,18 +336,17 @@ where
                         column,
                     },
                 )?;
-                let sum = acc
-                    .get(&column)
-                    .copied()
-                    .unwrap_or(zero)
-                    .checked_add_value(product)
-                    .ok_or(SpGemmError::ArithmeticOverflow {
-                        operation: ArithmeticOperation::Add,
-                        row,
-                        inner,
-                        column,
-                    })?;
-                acc.insert(column, sum);
+                let current = acc.entry(column).or_insert(zero);
+                let sum =
+                    current
+                        .checked_add_value(product)
+                        .ok_or(SpGemmError::ArithmeticOverflow {
+                            operation: ArithmeticOperation::Add,
+                            row,
+                            inner,
+                            column,
+                        })?;
+                *current = sum;
             }
         }
         let mut output_row: Vec<_> = acc
@@ -467,6 +466,99 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_variants_preserve_cancellation_empty_rows_and_stats() {
+        let a = CsrMatrix::from_triplets(3, 3, &[(0, 0, 2_i64), (0, 1, -2), (2, 2, 3)]);
+        let b = CsrMatrix::from_triplets(
+            3,
+            4,
+            &[(0, 1, 5_i64), (0, 3, 1), (1, 1, 5), (1, 3, 2), (2, 0, 7)],
+        );
+        // Independent hand-computed output: column 1 cancels in the first row.
+        for (product, stats) in [
+            try_spgemm_hash(&a, &b).unwrap(),
+            try_spgemm_hash_checked(&a, &b).unwrap(),
+        ] {
+            assert_eq!(product.row_ptr, vec![0, 1, 1, 2]);
+            assert_eq!(product.col_idx, vec![3, 0]);
+            assert_eq!(product.values, vec![-2, 21]);
+            assert_eq!(stats.candidate_products, 5);
+        }
+        let (wide, stats) = try_spgemm_checked_with_accumulator::<i64, i128, _, _>(
+            &a,
+            &b,
+            SpGemmOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(wide.row_ptr, vec![0, 1, 1, 2]);
+        assert_eq!(wide.col_idx, vec![3, 0]);
+        assert_eq!(wide.values, vec![-2, 21]);
+        assert_eq!(stats.candidate_products, 5);
+        let empty = CsrMatrix::<i64>::zeros(2, 0);
+        let right = CsrMatrix::<i64>::zeros(0, 4);
+        for (product, stats) in [
+            try_spgemm_hash(&empty, &right).unwrap(),
+            try_spgemm_hash_checked(&empty, &right).unwrap(),
+        ] {
+            assert_eq!(product.row_ptr, vec![0, 0, 0]);
+            assert!(product.values.is_empty());
+            assert_eq!(stats.candidate_products, 0);
+        }
+    }
+
+    #[test]
+    fn checked_addition_still_rejects_overflow_before_later_cancellation() {
+        let a = CsrMatrix::from_triplets(1, 3, &[(0, 0, 100_i8), (0, 1, 100), (0, 2, -100)]);
+        let b = CsrMatrix::from_triplets(3, 1, &[(0, 0, 1_i8), (1, 0, 1), (2, 0, 1)]);
+        for result in [
+            try_spgemm_hash_checked(&a, &b),
+            try_spgemm_checked_with_accumulator::<i8, i8, _, _>(&a, &b, SpGemmOptions::default()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(SpGemmError::ArithmeticOverflow {
+                    operation: ArithmeticOperation::Add,
+                    row: 0,
+                    inner: 1,
+                    column: 0,
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn semiring_identity_is_called_only_for_new_columns() {
+        use std::cell::RefCell;
+        struct Traced<'a>(&'a RefCell<Vec<&'static str>>);
+        impl Semiring<i64> for Traced<'_> {
+            fn zero(&self) -> i64 {
+                self.0.borrow_mut().push("zero");
+                0
+            }
+            fn add(&self, left: i64, right: i64) -> i64 {
+                self.0.borrow_mut().push("add");
+                left + right
+            }
+            fn multiply(&self, left: i64, right: i64) -> i64 {
+                self.0.borrow_mut().push("multiply");
+                left * right
+            }
+            fn is_zero(&self, value: i64) -> bool {
+                value == 0
+            }
+        }
+        let trace = RefCell::new(Vec::new());
+        let a = CsrMatrix::from_triplets(1, 2, &[(0, 0, 2_i64), (0, 1, 3)]);
+        let b = CsrMatrix::from_triplets(2, 1, &[(0, 0, 5_i64), (1, 0, 7)]);
+        let (product, _) =
+            try_spgemm_semiring(&a, &b, Traced(&trace), SpGemmOptions::default()).unwrap();
+        assert_eq!(product.values, vec![31]);
+        assert_eq!(
+            *trace.borrow(),
+            vec!["multiply", "zero", "add", "multiply", "add"]
+        );
+    }
 
     #[test]
     fn tiny_spgemm() {

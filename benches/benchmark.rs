@@ -1,7 +1,8 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use sketch_spgemm::{
     adaptive_matmul, auto_spgemm, left_sketch, overlap_problem, right_sketch,
-    sparse_output_problem, spgemm_hash, AutoSpGemmConfig, RectangularPolicy, SketchMap,
+    sparse_output_problem, spgemm_hash, try_spgemm_checked_with_accumulator, try_spgemm_hash,
+    try_spgemm_hash_checked, AutoSpGemmConfig, RectangularPolicy, SketchMap, SpGemmOptions,
     SyntheticProblem,
 };
 use std::hint::black_box;
@@ -27,6 +28,32 @@ fn product_benchmarks(criterion: &mut Criterion) {
             problem.expected_candidate_products
         );
 
+        for (product, direct_stats) in [
+            try_spgemm_hash(&problem.a, &problem.b).unwrap(),
+            try_spgemm_hash_checked(&problem.a, &problem.b).unwrap(),
+        ] {
+            assert_eq!(product, expected);
+            assert_eq!(direct_stats.candidate_products, stats.candidate_products);
+        }
+        let (wide, wide_stats) = try_spgemm_checked_with_accumulator::<i64, i128, _, _>(
+            &problem.a,
+            &problem.b,
+            SpGemmOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(wide.row_ptr, expected.row_ptr);
+        assert_eq!(wide.col_idx, expected.col_idx);
+        assert_eq!(
+            wide.values,
+            expected
+                .values
+                .iter()
+                .copied()
+                .map(i128::from)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(wide_stats.candidate_products, stats.candidate_products);
+
         let dense_a = problem.a.to_dense();
         let dense_b = problem.b.to_dense();
         let (dense_product, _) = adaptive_matmul(&dense_a, &dense_b, RectangularPolicy::Auto);
@@ -42,6 +69,33 @@ fn product_benchmarks(criterion: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("hash-csr", name), &problem, |b, input| {
             b.iter(|| spgemm_hash(black_box(&input.a), black_box(&input.b)))
+        });
+
+        group.bench_with_input(
+            BenchmarkId::new("fallible-csr", name),
+            &problem,
+            |b, input| {
+                b.iter(|| try_spgemm_hash(black_box(&input.a), black_box(&input.b)).unwrap())
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("checked-csr", name),
+            &problem,
+            |b, input| {
+                b.iter(|| {
+                    try_spgemm_hash_checked(black_box(&input.a), black_box(&input.b)).unwrap()
+                })
+            },
+        );
+        group.bench_with_input(BenchmarkId::new("wide-csr", name), &problem, |b, input| {
+            b.iter(|| {
+                try_spgemm_checked_with_accumulator::<i64, i128, _, _>(
+                    black_box(&input.a),
+                    black_box(&input.b),
+                    SpGemmOptions::default(),
+                )
+                .unwrap()
+            })
         });
 
         group.bench_with_input(
