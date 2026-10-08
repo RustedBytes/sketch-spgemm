@@ -2,7 +2,47 @@ name: Rust
 
 on:
   push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
+      - "tests/**"
+      - "benches/**"
+      - "examples/**"
+      - "python/src/**"
+      - "python/Cargo.toml"
+      - "rustfmt.toml"
+      - ".rustfmt.toml"
+      - "clippy.toml"
+      - ".clippy.toml"
+      - ".github/workflows/rust.yml"
   pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
+      - "tests/**"
+      - "benches/**"
+      - "examples/**"
+      - "python/src/**"
+      - "python/Cargo.toml"
+      - "rustfmt.toml"
+      - ".rustfmt.toml"
+      - "clippy.toml"
+      - ".clippy.toml"
+      - ".github/workflows/rust.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
