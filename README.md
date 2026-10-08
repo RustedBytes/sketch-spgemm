@@ -98,6 +98,10 @@ cargo test
 cargo bench --bench benchmark
 ```
 
+For CSR builder, transpose, and residual certificate measurements, see
+[BENCHMARKS.md](BENCHMARKS.md).
+
+
 ### Python bindings
 
 The Python package supports CPython 3.9 or newer. CSR values use NumPy `int32`,
