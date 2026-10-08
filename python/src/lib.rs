@@ -177,8 +177,27 @@ fn extend_builder<T>(
 where
     T: Element + Copy + Default + PartialEq + core::CheckedAddScalar,
 {
-    let triplets = collect_triplets(data, row_indices, column_indices)?;
-    builder.try_extend(triplets).map_err(map_build_error)?;
+    let data = data
+        .as_slice()
+        .map_err(|_| value_error("data must be a contiguous one-dimensional array"))?;
+    let rows = row_indices
+        .as_slice()
+        .map_err(|_| value_error("row_indices must be a contiguous one-dimensional array"))?;
+    let columns = column_indices
+        .as_slice()
+        .map_err(|_| value_error("column_indices must be a contiguous one-dimensional array"))?;
+    if data.len() != rows.len() || data.len() != columns.len() {
+        return Err(value_error(
+            "data, row_indices, and column_indices must have equal lengths",
+        ));
+    }
+    for position in 0..data.len() {
+        let row = nonnegative_index("row_indices", position, rows[position])?;
+        let column = nonnegative_index("column_indices", position, columns[position])?;
+        builder
+            .try_push(row, column, data[position])
+            .map_err(map_build_error)?;
+    }
     Ok(())
 }
 
