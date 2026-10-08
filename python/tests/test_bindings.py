@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from importlib.metadata import version
 
 import numpy as np
 import pytest
@@ -36,7 +37,7 @@ def test_import_and_exact_product(operands):
 
 
 def test_version():
-    assert ssg.__version__ == "0.11.0"
+    assert ssg.__version__ == version("sketch-spgemm")
 
 
 def test_checked_product_and_overflow(operands):
