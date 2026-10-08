@@ -666,3 +666,16 @@ kernels, additional datasets, property testing, and reproducible benchmarks.
 ## License
 
 Licensed under the [MIT License](LICENSE-MIT).
+
+## Version updates
+
+In GitHub Actions, run **Bump version** on `main`. Choose `patch`, `minor`, or
+`major`, or supply a greater stable `MAJOR.MINOR.PATCH` version. The workflow
+updates both Cargo manifests, Python metadata and module version, regenerates
+`Cargo.lock` with Cargo, and moves Unreleased notes into a dated release section.
+It tests the Rust workspace, creates a version PR, and explicitly dispatches
+Rust and Python CI on that branch. Review and merge the PR before creating a
+release tag. The workflow itself does not create tags or publish releases.
+
+Repository Actions settings must allow GitHub Actions to create pull requests.
+An existing version branch or tag is rejected rather than overwritten.

@@ -20,6 +20,8 @@ on:
       - "clippy.toml"
       - ".clippy.toml"
       - ".github/workflows/rust.yml"
+      - ".github/workflows/version-bump.yml"
+      - ".github/scripts/**"
   pull_request:
     paths:
       - "src/**"
@@ -38,6 +40,8 @@ on:
       - "clippy.toml"
       - ".clippy.toml"
       - ".github/workflows/rust.yml"
+      - ".github/workflows/version-bump.yml"
+      - ".github/scripts/**"
   workflow_dispatch:
 
 concurrency:
@@ -71,6 +75,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Test version automation
+        run: python3 -m unittest discover -s .github/scripts -p "test_*.py"
       - run: cargo fmt --all --check
       # Existing warnings are reported without blocking focused changes.
       - run: cargo clippy --locked --workspace --all-targets --all-features
