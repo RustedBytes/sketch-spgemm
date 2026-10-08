@@ -5,6 +5,15 @@ All notable changes to `sketch-spgemm` are documented in this file.
 The project follows Semantic Versioning while it is in the `0.x` development
 series. Breaking public API changes may therefore appear in minor releases.
 
+## Unreleased
+
+### Performance
+
+- Update direct semiring, checked, and widened-accumulator sparse products
+  through a single hash-map entry lookup per candidate contribution, preserving
+  arithmetic order, overflow diagnostics, output budgets, and public APIs.
+- Add Criterion coverage for fallible, checked, and widened direct kernels.
+
 ## 0.11.0
 
 ### Added
