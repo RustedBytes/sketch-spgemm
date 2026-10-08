@@ -507,7 +507,12 @@ phi(AB) = r^T A B s = (r^T A)(B s)
 phi(D)  = sum_(i,j in supp(D)) r_i * D_ij * s_j
 ```
 
-The candidate passes when `phi(D) == phi(AB)` in every lane. Target setup is
+Verification requires `phi(D) == phi(AB)` in every lane in both the primary
+field and a second field modulo `2^64 - 59`. The same nonzero weights are used
+in both fields. A conservative bound on each integer residual must be smaller
+than the product of the primes; otherwise verification returns false. This
+prevents nonzero residuals from disappearing modulo both primes before the
+random projection. Target setup is
 linear in the input nonzeros, and candidate checking is linear in `nnz(D)`.
 Three independently seeded lanes are enabled by default.
 
@@ -614,7 +619,11 @@ Release-to-release changes are maintained in [changelog.md](changelog.md).
 - Execution is CPU-only and currently single-process.
 - There are no CUDA, Metal, or distributed integrations.
 - The practical moment/fingerprint path is probabilistic rather than the
-  deterministic theorem from the motivating paper.
+  deterministic theorem from the motivating paper. Verification checks two prime
+  fields (`2^61 - 1` and `2^64 - 59`) and a conservative absolute residual bound
+  to avoid systematic aliases of either modulus. Extremely large bounds cause
+  certificate rejection and, when enabled, an exact fallback. `fingerprint()` and `target()`
+  still expose the original primary-field values; use `verifies()` for certification.
 - Performance depends strongly on output geometry. Sparse inputs alone do not
   imply that sketch recovery will be beneficial.
 
@@ -625,7 +634,7 @@ src/
 ├── auto.rs        workload sampling and exact/sketch selection
 ├── dispatch.rs    scalar-aware automatic/direct dispatch
 ├── error.rs       structured construction and arithmetic errors
-├── fingerprint.rs bilinear residual certificate over 2^61 - 1
+├── fingerprint.rs bilinear residual certificate over two prime fields
 ├── guv.rs         explicit GUV finite-field construction
 ├── interop/       optional sprs and petgraph adapters
 ├── matrix.rs      scalar-generic CSR and dense matrix containers
